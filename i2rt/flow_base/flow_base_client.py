@@ -73,6 +73,25 @@ class FlowBaseClient:
             self._thread.join(timeout=1.0)
 
 
+def _format_linear_rail_state(rail_state: Any) -> str:
+    """Format linear rail state defensively for CLI output."""
+    if not isinstance(rail_state, dict):
+        return f"unexpected response: {rail_state!r}"
+
+    position = rail_state.get("position")
+    velocity = rail_state.get("velocity")
+    upper_limit = rail_state.get("upper_limit_triggered")
+    lower_limit = rail_state.get("lower_limit_triggered")
+
+    if position is None or velocity is None:
+        return f"linear rail response: {rail_state}"
+
+    return (
+        f"position: {position:.4f} velocity: {velocity:.4f} "
+        f"upper_limit: {upper_limit} lower_limit: {lower_limit}"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
@@ -86,49 +105,43 @@ if __name__ == "__main__":
 
     client = FlowBaseClient(args.host, with_linear_rail=use_linear_rail)
 
-    if args.command == "get_odometry":
-        print(client.get_odometry())
-        client.close()
-        exit()
-    elif args.command == "reset_odometry":
-        client.reset_odometry()
-        client.close()
-        exit()
-    elif args.command == "test_command":
-        client.set_target_velocity(np.array([0.0, 0.0, 0.1]), "local")
-        while True:
-            odo_reading = client.get_odometry()
-            sys.stdout.write(f"\r translation: {odo_reading['translation']} rotation: {odo_reading['rotation']}")
-            sys.stdout.flush()
-            time.sleep(0.02)
-    elif args.command == "test_linear_rail":
-        try:
-            client.set_linear_rail_velocity(0.5)
+    try:
+        if args.command == "get_odometry":
+            print(client.get_odometry())
+            sys.exit(0)
+        elif args.command == "reset_odometry":
+            client.reset_odometry()
+            sys.exit(0)
+        elif args.command == "test_command":
+            client.set_target_velocity(np.array([0.0, 0.0, 0.1]), "local")
             while True:
-                rail_state = client.get_linear_rail_state()
-                sys.stdout.write(
-                    f"\r position: {rail_state['position']:.4f} velocity: {rail_state['velocity']:.4f} "
-                    f"upper_limit: {rail_state['upper_limit_triggered']} lower_limit: {rail_state['lower_limit_triggered']}"
-                )
+                odo_reading = client.get_odometry()
+                sys.stdout.write(f"\r translation: {odo_reading['translation']} rotation: {odo_reading['rotation']}")
                 sys.stdout.flush()
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            print("\nStopping...")
-            client.set_linear_rail_velocity(0.0)
-            time.sleep(0.5)
-    elif args.command == "get_linear_rail_state":
-        print("Monitoring linear rail state (Press Ctrl+C to exit)")
-        try:
-            while True:
-                rail_state = client.get_linear_rail_state()
-                sys.stdout.write(
-                    f"\r position: {rail_state['position']:.4f} velocity: {rail_state['velocity']:.4f} "
-                    f"upper_limit: {rail_state['upper_limit_triggered']} lower_limit: {rail_state['lower_limit_triggered']}"
-                )
-                sys.stdout.flush()
-                time.sleep(1.0)
-        except KeyboardInterrupt:
-            print("\nExiting")
-    else:
+                time.sleep(0.02)
+        elif args.command == "test_linear_rail":
+            try:
+                client.set_linear_rail_velocity(0.5)
+                while True:
+                    rail_state = client.get_linear_rail_state()
+                    sys.stdout.write(f"\r {_format_linear_rail_state(rail_state)}")
+                    sys.stdout.flush()
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                print("\nStopping...")
+                client.set_linear_rail_velocity(0.0)
+                time.sleep(0.5)
+        elif args.command == "get_linear_rail_state":
+            print("Monitoring linear rail state (Press Ctrl+C to exit)")
+            try:
+                while True:
+                    rail_state = client.get_linear_rail_state()
+                    sys.stdout.write(f"\r {_format_linear_rail_state(rail_state)}")
+                    sys.stdout.flush()
+                    time.sleep(1.0)
+            except KeyboardInterrupt:
+                print("\nExiting")
+        else:
+            sys.exit(1)
+    finally:
         client.close()
-        sys.exit(1)
