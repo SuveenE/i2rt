@@ -119,34 +119,6 @@ def get_yam_robot(
         kp = np.concatenate([kp, np.array([gripper_kp])])
         kd = np.concatenate([kd, np.array([gripper_kd])])
 
-    # Read motor positions to detect multi-turn offsets before starting control.
-    # Motors can report positions outside [-pi, pi] after power cycles; wrapping
-    # them prevents the gravity compensation model from computing wrong torques.
-    probe_chain = DMChainCanInterface(
-        motor_list,
-        motor_offsets,
-        motor_directions,
-        channel,
-        motor_chain_name="yam_real",
-        receive_mode=ReceiveMode.p16,
-        start_thread=False,
-    )
-    probe_states = probe_chain.read_states()
-    logging.info(f"YAM probe motor_states: {probe_states}")
-    probe_chain.close()
-
-    for idx, motor_state in enumerate(probe_states):
-        motor_position = motor_state.pos
-        if motor_position < -np.pi:
-            logging.info(f"motor {idx} is at {motor_position}, adding {2 * np.pi}")
-            motor_offsets[idx] += -2 * np.pi
-        elif motor_position > np.pi:
-            logging.info(f"motor {idx} is at {motor_position}, subtracting {2 * np.pi}")
-            motor_offsets[idx] += 2 * np.pi
-
-    time.sleep(0.5)
-    logging.info(f"adjusted motor_offsets: {motor_offsets}")
-
     motor_chain = DMChainCanInterface(
         motor_list,
         motor_offsets,
