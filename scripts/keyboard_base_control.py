@@ -25,7 +25,7 @@ from i2rt.flow_base.flow_base_client import FlowBaseClient
 
 SPEED_STEP = 0.05
 ROTATION_STEP = 0.1
-RAIL_SPEED_STEP = 1.0
+RAIL_SPEED_STEP = 0.5
 
 KEY_BINDINGS = {
     "w": ("vx", +1),
