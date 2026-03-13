@@ -809,7 +809,13 @@ if __name__ == "__main__":
 
     def get_current_command(input_dict: Dict[str, Any] | None = None) -> Dict[str, Any]:
         with _resolved_lock:
-            return _resolved_command
+            return dict(_resolved_command)
+
+    def update_resolved_command(velocity: list, frame: str, source: str) -> None:
+        with _resolved_lock:
+            _resolved_command["velocity"] = velocity
+            _resolved_command["frame"] = frame
+            _resolved_command["source"] = source
 
     # setup server for remote calls
     server = portal.Server(BASE_DEFAULT_PORT)
@@ -932,10 +938,11 @@ if __name__ == "__main__":
                 scaled_cmd = np.append(cmd * max_vel, 0.0)
                 vehicle.set_target_velocity(cmd * max_vel, frame=frame)
 
-            with _resolved_lock:
-                _resolved_command["velocity"] = scaled_cmd.tolist()
-                _resolved_command["frame"] = frame
-                _resolved_command["source"] = "gamepad" if gamepad_command_override else "remote"
+            update_resolved_command(
+                velocity=scaled_cmd.tolist(),
+                frame=frame,
+                source="gamepad" if gamepad_command_override else "remote",
+            )
 
             time.sleep(0.02)
     except KeyboardInterrupt:
