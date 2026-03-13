@@ -717,7 +717,7 @@ if __name__ == "__main__":
     from i2rt.utils.gamepad_utils import Gamepad
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--channel", type=str, default="can0")
+    parser.add_argument("--channel", type=str, default="can_linearbot")
     parser.add_argument(
         "--no-linear-rail",
         action="store_true",
