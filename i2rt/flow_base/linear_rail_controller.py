@@ -373,6 +373,8 @@ class LinearRailController:
         assert self.initialized, "Linear rail must be initialized before setting velocity"
         assert not self.brake_on, "Brake must be released before setting velocity"
 
+        vel = float(np.clip(vel, -self.rail_speed, self.rail_speed))
+
         with self._lock:
             current_time = time.time()
             if current_time - self.last_command_time > self.command_timeout:
