@@ -755,6 +755,9 @@ if __name__ == "__main__":
     import sys
     import time
 
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
+
     import pygame
 
     from i2rt.utils.gamepad_utils import Gamepad
@@ -944,9 +947,9 @@ if __name__ == "__main__":
                 cmd = user_cmd
                 frame = user_frame
             if count % 20 == 0:
-                # print up 1 float point
-                # print(f"frame: {frame}, cmd: {cmd[0]:.1f}, {cmd[1]:.1f}, {cmd[2]:.1f}, rail: {cmd[3]:.1f}")
-                sys.stdout.write(f"\rframe: {frame} cmd: {cmd[0]:.1f} {cmd[1]:.1f} {cmd[2]:.1f} rail: {cmd[3]:.1f}")
+                raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
+                axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                sys.stdout.write(f"\rframe: {frame} cmd: {cmd[0]:.1f} {cmd[1]:.1f} {cmd[2]:.1f} rail: {cmd[3]:.1f} | {axes_str}")
                 sys.stdout.flush()
 
             # Log linear rail position and velocity every 1 second
