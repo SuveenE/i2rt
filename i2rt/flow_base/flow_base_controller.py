@@ -883,7 +883,7 @@ if __name__ == "__main__":
 
     # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
     while True:
-        pygame.event.pump()
+        gamepad._poll()
         four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
         if all(np.abs(axis) < DEADZONE for axis in four_axis):
             logger.info("Joystick is at rest, please check joystick")
