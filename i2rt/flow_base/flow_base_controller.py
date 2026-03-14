@@ -775,6 +775,7 @@ if __name__ == "__main__":
     )
 
     # Initialize pygame and joystick
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     pygame.init()
     pygame.joystick.init()
     if pygame.joystick.get_count() == 0:
