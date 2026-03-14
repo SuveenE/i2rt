@@ -23,10 +23,15 @@ from dm_env.specs import Array
 from ruckig import ControlInterface, InputParameter, OutputParameter, Result, Ruckig
 from threadpoolctl import threadpool_limits
 
+from i2rt.flow_base.gpio_backend import (
+    LocalGPIOBackend,
+    NoopGPIOBackend,
+    RemoteGPIOBackend,
+)
 from i2rt.flow_base.linear_rail_controller import (
     LinearRailController,
     SingleMotorControlInterface,
-    initialize_brake_gpio,
+    initialize_brake_gpio,  # noqa: F401 — re-exported for backward compatibility
 )
 from i2rt.motor_drivers.dm_driver import ControlMode, DMChainCanInterface
 
@@ -551,6 +556,7 @@ class LinearRailVehicle(Vehicle):
         auto_home: bool = True,
         homing_timeout: float = 30.0,
         enable_linear_rail: bool = True,
+        gpio_host: Optional[str] = None,
     ):
         """
         Initialize LinearRailVehicle with optional linear rail lift module.
@@ -566,6 +572,10 @@ class LinearRailVehicle(Vehicle):
             auto_home: Whether to automatically home the linear rail on initialization
             homing_timeout: Timeout for homing procedure (seconds)
             enable_linear_rail: Whether to enable linear rail. If False, only base (8 motors) will be initialized.
+            gpio_host: Address of the RPi GPIO satellite server (e.g. "192.168.1.50:8765").
+                If provided, brake and limit switch GPIO operations are performed
+                remotely via portal RPC.  If *None*, falls back to local RPi.GPIO
+                or a no-op backend when RPi.GPIO is unavailable.
         """
         # Create base motor list (8 motors: 4 casters * 2 motors each)
         motor_list = []
@@ -603,9 +613,10 @@ class LinearRailVehicle(Vehicle):
             control_mode=ControlMode.VEL,
         )
 
-        # Initialize brake GPIO only if linear rail is enabled
+        # Select GPIO backend
+        gpio_backend = self._create_gpio_backend(gpio_host, enable_linear_rail)
         if enable_linear_rail:
-            initialize_brake_gpio()
+            gpio_backend.initialize_brake()
 
         # Initialize vehicle base with the unified motor chain using super().__init__()
         super().__init__(
@@ -626,6 +637,7 @@ class LinearRailVehicle(Vehicle):
             # Initialize linear rail controller (without auto_home to initialize GPIO first)
             self.linear_rail = LinearRailController(
                 single_motor_control_interface=single_motor_interface,
+                gpio_backend=gpio_backend,
                 rail_speed=lift_max_vel,
                 auto_home=False,  # Don't auto home yet, initialize GPIO first
                 homing_timeout=homing_timeout,
@@ -643,6 +655,37 @@ class LinearRailVehicle(Vehicle):
                 self.caster_module_controller.homing_check_callback = (
                     lambda: self.linear_rail.is_homing() if self.linear_rail else False
                 )
+
+    @staticmethod
+    def _create_gpio_backend(gpio_host: Optional[str], enable_linear_rail: bool):
+        """Select the appropriate GPIOBackend based on configuration.
+
+        Raises RuntimeError when linear rail is enabled but no GPIO source
+        (local RPi.GPIO or remote satellite) is available — running without
+        brake and limit-switch control is unsafe.
+        """
+        if not enable_linear_rail:
+            return NoopGPIOBackend()
+
+        if gpio_host is not None:
+            logger.info(f"Using remote GPIO backend at {gpio_host}")
+            return RemoteGPIOBackend(gpio_host)
+
+        try:
+            backend = LocalGPIOBackend()
+            logger.info("Using local RPi.GPIO backend")
+            return backend
+        except (ImportError, RuntimeError):
+            raise RuntimeError(
+                "Linear rail is enabled but no GPIO backend is available. "
+                "RPi.GPIO is not installed (not running on a Raspberry Pi) "
+                "and no --gpio-host was provided.\n"
+                "Either:\n"
+                "  1. Run on a Raspberry Pi where RPi.GPIO is available, or\n"
+                "  2. Start the GPIO satellite on the RPi and pass "
+                "--gpio-host <RPI_IP>:8765, or\n"
+                "  3. Disable the linear rail with --no-linear-rail"
+            )
 
     def set_target_velocity(self, velocity: Any, frame: str = "local") -> None:
         """Set target velocity for both base and linear rail.
@@ -723,6 +766,13 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable linear rail (use only 8 base motors)",
     )
+    parser.add_argument(
+        "--gpio-host",
+        type=str,
+        default=None,
+        help="Address of the RPi GPIO satellite server (e.g. 192.168.1.50:8765). "
+        "If not set, falls back to local RPi.GPIO or no-op.",
+    )
 
     # Initialize pygame and joystick
     pygame.init()
@@ -749,7 +799,8 @@ if __name__ == "__main__":
         lift_max_vel=lift_max_vel,
         channel=args.channel,
         auto_home=True,
-        enable_linear_rail=not args.no_linear_rail,  # Enable by default, disable with --no-linear-rail
+        enable_linear_rail=not args.no_linear_rail,
+        gpio_host=args.gpio_host,
     )
 
     # Register cleanup function to ensure brake is engaged on exit
