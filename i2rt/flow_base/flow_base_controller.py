@@ -774,15 +774,6 @@ if __name__ == "__main__":
         "If not set, falls back to local RPi.GPIO or no-op.",
     )
 
-    # Initialize pygame and joystick
-    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
-    pygame.init()
-    pygame.joystick.init()
-    if pygame.joystick.get_count() == 0:
-        print("No joystick/gamepad connected!")
-        exit()
-
-    joy = pygame.joystick.Joystick(0)
     CALIBRATION_RETRY_DELAY = 1
     DEADZONE = 0.05  # Deadzone for base control (x, y, theta)
     RAIL_DEADZONE = 0.15  # Larger deadzone for linear rail to prevent unwanted movement
@@ -883,13 +874,12 @@ if __name__ == "__main__":
 
     server.start(block=False)
 
-    print(f"Joystick Name: {joy.get_name()}")
-    print(f"Number of Axes: {joy.get_numaxes()}")
-    print(f"Number of Buttons: {joy.get_numbuttons()}")
+    # Single pygame/joystick init via Gamepad — avoids double-init bugs
+    gamepad = Gamepad()
+    joy = gamepad.joy
 
     # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
     while True:
-        # Pump events to update joystick state
         pygame.event.pump()
         four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
         if all(np.abs(axis) < DEADZONE for axis in four_axis):
@@ -901,7 +891,6 @@ if __name__ == "__main__":
             time.sleep(CALIBRATION_RETRY_DELAY)
 
     # Main loop to read joystick inputs
-    gamepad = Gamepad()
     gamepad_command_frame = "local"
     gamepad_command_override = True
 
