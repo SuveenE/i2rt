@@ -782,9 +782,9 @@ if __name__ == "__main__":
     RAIL_DEADZONE = 0.15  # Larger deadzone for linear rail to prevent unwanted movement
     args = parser.parse_args()
 
-    max_vel = np.array([0.8, 0.8, 3.0])
-    max_accel = np.array([0.8, 0.8, 3.0])
-    lift_max_vel = 14.0  # Maximum velocity for linear rail (rad/s)
+    max_vel = np.array([0.4, 0.4, 1,5])
+    max_accel = np.array([0.4, 0.4, 1.5])
+    lift_max_vel = 7.0  # Maximum velocity for linear rail (rad/s)
 
     # Use LinearRailVehicle instead of Vehicle
     # Use --no-linear-rail flag if you only have base (8 motors) without linear rail
