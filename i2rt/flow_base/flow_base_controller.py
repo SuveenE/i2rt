@@ -658,7 +658,12 @@ class LinearRailVehicle(Vehicle):
 
     @staticmethod
     def _create_gpio_backend(gpio_host: Optional[str], enable_linear_rail: bool):
-        """Select the appropriate GPIOBackend based on configuration."""
+        """Select the appropriate GPIOBackend based on configuration.
+
+        Raises RuntimeError when linear rail is enabled but no GPIO source
+        (local RPi.GPIO or remote satellite) is available — running without
+        brake and limit-switch control is unsafe.
+        """
         if not enable_linear_rail:
             return NoopGPIOBackend()
 
@@ -671,8 +676,16 @@ class LinearRailVehicle(Vehicle):
             logger.info("Using local RPi.GPIO backend")
             return backend
         except (ImportError, RuntimeError):
-            logger.warning("RPi.GPIO not available, falling back to NoopGPIOBackend")
-            return NoopGPIOBackend()
+            raise RuntimeError(
+                "Linear rail is enabled but no GPIO backend is available. "
+                "RPi.GPIO is not installed (not running on a Raspberry Pi) "
+                "and no --gpio-host was provided.\n"
+                "Either:\n"
+                "  1. Run on a Raspberry Pi where RPi.GPIO is available, or\n"
+                "  2. Start the GPIO satellite on the RPi and pass "
+                "--gpio-host <RPI_IP>:8765, or\n"
+                "  3. Disable the linear rail with --no-linear-rail"
+            )
 
     def set_target_velocity(self, velocity: Any, frame: str = "local") -> None:
         """Set target velocity for both base and linear rail.
