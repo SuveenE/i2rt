@@ -8,7 +8,7 @@ import pygame
 class Gamepad:
     def __init__(self):
         os.environ["SDL_VIDEODRIVER"] = "dummy"
-        # Initialize pygame and joystick
+        os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
         pygame.init()
         pygame.joystick.init()
         if pygame.joystick.get_count() == 0:

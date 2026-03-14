@@ -24,6 +24,7 @@ def clear_screen():
 def test_pygame_gamepad():
     """Test gamepad using pygame backend (all raw axes + buttons)."""
     os.environ["SDL_VIDEODRIVER"] = "dummy"
+    os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
     import pygame
 
     pygame.init()
