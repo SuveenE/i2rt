@@ -877,16 +877,32 @@ if __name__ == "__main__":
             _resolved_command["frame"] = frame
             _resolved_command["source"] = source
 
+    def rpc_logged(name: str, handler):
+        def wrapped(input_dict: Dict[str, Any] | None = None):
+            logger.info(f"RPC enter: {name} on thread {threading.current_thread().name}")
+            start_t = time.perf_counter()
+            try:
+                result = handler(input_dict)
+            except Exception:
+                dt_ms = (time.perf_counter() - start_t) * 1e3
+                logger.exception(f"RPC error: {name} after {dt_ms:.1f} ms")
+                raise
+            dt_ms = (time.perf_counter() - start_t) * 1e3
+            logger.info(f"RPC exit: {name} after {dt_ms:.1f} ms")
+            return result
+
+        return wrapped
+
     # setup server for remote calls
     server = portal.Server(BASE_DEFAULT_PORT)
-    server.bind("get_odometry", vehicle.get_odometry)
-    server.bind("reset_odometry", vehicle.reset_odometry)
-    server.bind("set_target_velocity", remote_command.remote_set_target_velocity)
-    server.bind("get_current_command", get_current_command)
+    server.bind("get_odometry", rpc_logged("get_odometry", vehicle.get_odometry))
+    server.bind("reset_odometry", rpc_logged("reset_odometry", vehicle.reset_odometry))
+    server.bind("set_target_velocity", rpc_logged("set_target_velocity", remote_command.remote_set_target_velocity))
+    server.bind("get_current_command", rpc_logged("get_current_command", get_current_command))
 
     # Bind linear rail APIs if vehicle has linear rail
     if hasattr(vehicle, "linear_rail"):
-        server.bind("get_linear_rail_state", vehicle.get_linear_rail_state)
+        server.bind("get_linear_rail_state", rpc_logged("get_linear_rail_state", vehicle.get_linear_rail_state))
         logger.info("Linear rail APIs bound to server")
 
     server.start(block=False)
