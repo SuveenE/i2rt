@@ -493,11 +493,16 @@ class Vehicle(Robot):
             self.command_queue.put(command, block=False)
 
     def get_odometry(self, input_dict: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        start_t = time.perf_counter()
         with self._lock:
-            return {
+            result = {
                 "translation": self.x[:2],
                 "rotation": self.x[2],
             }
+        dt_ms = (time.perf_counter() - start_t) * 1e3
+        if dt_ms > 50.0:
+            logger.warning(f"RPC handler slow: get_odometry took {dt_ms:.1f} ms")
+        return result
 
     def reset_odometry(self, input_dict: Dict[str, Any] | None = None) -> None:
         with self._lock:
@@ -719,11 +724,15 @@ class LinearRailVehicle(Vehicle):
         Args:
             input_dict: Optional dictionary (unused, for API compatibility)
         """
+        start_t = time.perf_counter()
         if self.linear_rail is None:
             return {"error": "Linear rail not available"}
         state = self.linear_rail.get_state()
         if "motor_state" in state:
             state = {k: v for k, v in state.items() if k != "motor_state"}
+        dt_ms = (time.perf_counter() - start_t) * 1e3
+        if dt_ms > 50.0:
+            logger.warning(f"RPC handler slow: get_linear_rail_state took {dt_ms:.1f} ms")
         return state
 
     def set_linear_rail_velocity(self, velocity: float) -> None:
@@ -854,8 +863,13 @@ if __name__ == "__main__":
     }
 
     def get_current_command(input_dict: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        start_t = time.perf_counter()
         with _resolved_lock:
-            return dict(_resolved_command)
+            result = dict(_resolved_command)
+        dt_ms = (time.perf_counter() - start_t) * 1e3
+        if dt_ms > 50.0:
+            logger.warning(f"RPC handler slow: get_current_command took {dt_ms:.1f} ms")
+        return result
 
     def update_resolved_command(velocity: list, frame: str, source: str) -> None:
         with _resolved_lock:
