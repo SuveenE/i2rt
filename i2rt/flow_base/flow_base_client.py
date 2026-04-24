@@ -88,9 +88,10 @@ if __name__ == "__main__":
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--command", type=str, default="get_odometry")
     parser.add_argument("--with-linear-rail", action="store_true", help="Enable linear rail support")
+    parser.add_argument("--target-pos", type=float, help="Target position in radians for move_linear_rail_to")
     args = parser.parse_args()
 
-    linear_rail_commands = ["test_linear_rail", "get_linear_rail_state"]
+    linear_rail_commands = ["test_linear_rail", "get_linear_rail_state", "move_linear_rail_to"]
     use_linear_rail = args.with_linear_rail or args.command in linear_rail_commands
 
     client = FlowBaseClient(args.host, with_linear_rail=use_linear_rail)
@@ -123,6 +124,47 @@ if __name__ == "__main__":
                 time.sleep(0.1)
         except KeyboardInterrupt:
             print("\nStopping...")
+            client.set_linear_rail_velocity(0.0)
+            time.sleep(0.5)
+    elif args.command == "move_linear_rail_to":
+        if args.target_pos is None:
+            print("Error: --target-pos is required for move_linear_rail_to")
+            client.close()
+            sys.exit(1)
+
+        target_pos = args.target_pos
+        max_speed = 1.5
+        kp = 1.0
+        tolerance = 0.05
+
+        state = client.get_linear_rail_state()
+        print(f"Current position: {state['position']:.4f} rad")
+        print(f"Target position:  {target_pos:.4f} rad")
+
+        try:
+            while True:
+                state = client.get_linear_rail_state()
+                error = target_pos - state["position"]
+                if abs(error) < tolerance:
+                    break
+                if state["upper_limit_triggered"] and error > 0:
+                    print("\nHit upper limit — stopping.")
+                    break
+                if state["lower_limit_triggered"] and error < 0:
+                    print("\nHit lower limit — stopping.")
+                    break
+                vel = float(np.clip(kp * error, -max_speed, max_speed))
+                client.set_linear_rail_velocity(vel)
+                sys.stdout.write(f"\r pos: {state['position']:.4f}  error: {error:+.4f}  vel: {vel:+.3f}")
+                sys.stdout.flush()
+                time.sleep(0.05)
+
+            client.set_linear_rail_velocity(0.0)
+            time.sleep(0.3)
+            final = client.get_linear_rail_state()["position"]
+            print(f"\nDone — final position: {final:.4f} rad")
+        except KeyboardInterrupt:
+            print("\nAborted")
             client.set_linear_rail_velocity(0.0)
             time.sleep(0.5)
     elif args.command == "get_linear_rail_state":
