@@ -133,8 +133,8 @@ if __name__ == "__main__":
             sys.exit(1)
 
         target_pos = args.target_pos
-        max_speed = 1.5
-        kp = 1.0
+        max_speed = 0.5
+        kp = 0.5
         tolerance = 0.05
 
         state = client.get_linear_rail_state()
