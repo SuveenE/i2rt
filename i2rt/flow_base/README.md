@@ -87,6 +87,109 @@ The exposed RJ45 network interface is preconfigured with static IP `172.6.2.20`.
 - Press **Left1** to reset odometry
 - Base screen displays current command: `frame: global cmd: 0.0 0.0 0.0`
 
+## Component Flowcharts (including Raspberry Pi path)
+
+The diagrams below map the current implementation in:
+- `i2rt/flow_base/flow_base_controller.py`
+- `i2rt/flow_base/flow_base_client.py`
+- `i2rt/flow_base/linear_rail_controller.py`
+- `i2rt/flow_base/gpio_backend.py`
+- `i2rt/flow_base/gpio_satellite_server.py`
+- `devices/FlowBase.desktop`, `devices/LinearRailVehicle.desktop`, `devices/setup_flow_desktop.sh`
+- `devices/install_devices.sh`, `devices/rules/flow_base.rules`
+
+### 1) Startup and launch flow on the Raspberry Pi
+
+```mermaid
+flowchart TD
+    A[One-time setup: devices/install_devices.sh] --> B[Install udev rule: devices/rules/flow_base.rules]
+    B --> C[USB CAN adapter detected]
+    C --> D[Load gs_usb + bring canX up at 1Mbps]
+
+    E[One-time setup: devices/setup_flow_desktop.sh] --> F[Copy FlowBase.desktop and LinearRailVehicle.desktop to Desktop]
+    F --> G[User double-clicks desktop icon]
+
+    G --> H{Selected icon}
+    H -->|FlowBase| I[Run flow_base_controller.py --channel can0 --no-linear-rail]
+    H -->|LinearRailVehicle| J[Run flow_base_controller.py --channel can0]
+
+    D --> I
+    D --> J
+```
+
+### 2) Runtime control/data flow (base + remote API + joystick)
+
+```mermaid
+flowchart LR
+    subgraph Inputs
+        GP[Gamepad via pygame]
+        API[Remote client: FlowBaseClient]
+    end
+
+    subgraph Controller["flow_base_controller.py"]
+        S[portal.Server bind APIs]
+        RC[TimeoutRemoteCommand]
+        ARB[Command arbitration<br/>Left2 decides gamepad override]
+        V[LinearRailVehicle / Vehicle]
+        CL[Vehicle control_loop at 200Hz]
+    end
+
+    subgraph Actuation
+        MC[VehicleMotorController]
+        CAN[DMChainCanInterface on can0]
+        M[8 base motors]
+    end
+
+    subgraph Feedback
+        ST[read_states -> update_state]
+        ODO[get_odometry / reset_odometry]
+    end
+
+    API -->|portal RPC: set_target_velocity| S
+    S --> RC
+    GP --> ARB
+    RC --> ARB
+    ARB -->|resolved cmd| V
+    V --> CL
+    CL --> MC
+    MC --> CAN
+    CAN --> M
+    M --> ST
+    ST --> ODO
+    ODO -->|portal RPC response| API
+```
+
+### 3) Linear rail + Raspberry Pi GPIO flow
+
+```mermaid
+flowchart TD
+    A[LinearRailVehicle(enable_linear_rail=True)] --> B{GPIO backend selection}
+    B -->|gpio_host not set| C[LocalGPIOBackend]
+    B -->|gpio_host set| D[RemoteGPIOBackend]
+
+    C --> E[RPi.GPIO on same Pi]
+    D --> F[portal RPC to gpio_satellite_server.py on Raspberry Pi]
+    F --> G[RPi.GPIO on Pi satellite]
+
+    E --> H[Brake pin GPIO12]
+    G --> H
+    E --> I[Limit switches GPIO5/GPIO6]
+    G --> I
+
+    I --> J[Limit change callback]
+    J --> K[LinearRailController]
+    K -->|stop on limit / enforce timeout| L[SingleMotorControlInterface]
+    L --> M[Motor 9 in DMChainCanInterface]
+```
+
+### 4) Safety behavior (where it happens)
+
+- **Base command timeout**: `Vehicle.control_loop()` holds pose / neutralizes motion when command stream stalls.
+- **Linear rail command timeout**: `LinearRailController.set_velocity()` detects stale command stream and stops rail.
+- **Limit switch hard stop**: limit callbacks in `LinearRailController` stop rail motion immediately.
+- **Brake management**: brake released for operation, re-engaged during cleanup.
+- **Remote override**: gamepad **Left2** can override remote API commands.
+
 ## API Control
 
 ### Network Setup
