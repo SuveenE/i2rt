@@ -135,7 +135,7 @@ if __name__ == "__main__":
         target_pos = args.target_pos
         max_speed = 0.05
         kp = 0.2
-        tolerance = 0.01
+        tolerance = 0.005
 
         state = client.get_linear_rail_state()
         print(f"Current position: {state['position']:.4f} rad")
