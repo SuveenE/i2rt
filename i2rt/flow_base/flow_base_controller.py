@@ -798,7 +798,39 @@ if __name__ == "__main__":
         type=float,
         default=0.25,
         help="Max base X velocity (m/s) when --x-only is set (default 0.25). "
-        "Pressing the D-pad left/right commands +/- this speed.",
+        "Full deflection of the chosen input commands +/- this speed.",
+    )
+    parser.add_argument(
+        "--x-input",
+        type=str,
+        default="auto",
+        choices=["auto", "dpad", "stick"],
+        help="X-only input source. 'auto' (default) uses D-pad if any hat is "
+        "available, otherwise falls back to an analog stick axis. 'dpad' "
+        "forces D-pad (joy.get_hat(0)). 'stick' forces an analog axis "
+        "(see --x-axis-index, --x-axis-invert).",
+    )
+    parser.add_argument(
+        "--x-axis-index",
+        type=int,
+        default=1,
+        help="Joystick axis index used for X velocity when the input source is "
+        "an analog stick (default 1 = left-stick Y). Common alternatives: "
+        "0 = left-stick X, 2 or 3 = right stick. Run the controller and "
+        "watch the 'aN' values in the status line to pick the right one.",
+    )
+    parser.add_argument(
+        "--x-axis-invert",
+        action="store_true",
+        help="Invert the analog X-axis input. Use this if pushing the stick "
+        "the 'wrong' way drives the base in the unexpected direction.",
+    )
+    parser.add_argument(
+        "--x-axis-deadzone",
+        type=float,
+        default=0.15,
+        help="Deadzone for the analog X-axis input (default 0.15). Stick "
+        "values with |v| below this map to 0 to avoid drift.",
     )
     parser.add_argument(
         "--rail-height",
@@ -1114,6 +1146,26 @@ if __name__ == "__main__":
         gamepad = Gamepad()
         joy = gamepad.joy
 
+        if args.x_only:
+            n_axes = joy.get_numaxes()
+            n_hats = joy.get_numhats()
+            if args.x_input == "dpad":
+                src = f"D-pad (hat 0 of {n_hats})"
+            elif args.x_input == "stick":
+                src = (
+                    f"analog axis {args.x_axis_index} (of {n_axes}, "
+                    f"deadzone={args.x_axis_deadzone}, invert={args.x_axis_invert})"
+                )
+            else:  # auto
+                if n_hats > 0:
+                    src = f"D-pad (auto: hat 0 of {n_hats}); stick fallback unused"
+                else:
+                    src = (
+                        f"analog axis {args.x_axis_index} (auto: no hats; "
+                        f"deadzone={args.x_axis_deadzone}, invert={args.x_axis_invert})"
+                    )
+            logger.info(f"--x-only X input source: {src}")
+
         # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
         while True:
             gamepad._poll()
@@ -1144,14 +1196,34 @@ if __name__ == "__main__":
                 gamepad_button = {"key_mode": 0, "key_left_2": 0, "key_left_1": 0}
 
             if args.x_only:
-                # X-only mode: read only the joystick D-pad (hat) for discrete X.
-                # Y, theta, and rail are hard-masked to zero so analog stick drift
-                # and accidental rail input cannot move the robot.
-                if joy is not None and joy.get_numhats() > 0:
-                    hat_x, _ = joy.get_hat(0)
-                else:
-                    hat_x = 0
-                x_norm = 1.0 if hat_x > 0 else (-1.0 if hat_x < 0 else 0.0)
+                # X-only mode: read a single user input for X velocity, then
+                # hard-mask Y, theta, and rail to zero so stick drift and
+                # accidental rail input cannot move the robot.
+                #
+                # Input source is selected by --x-input:
+                #   dpad  : joy.get_hat(0) -> {-1, 0, +1}
+                #   stick : joy.get_axis(--x-axis-index) with deadzone
+                #   auto  : D-pad if any hat exists, otherwise stick fallback.
+                x_norm = 0.0
+                if joy is not None:
+                    use_dpad = (
+                        args.x_input == "dpad"
+                        or (args.x_input == "auto" and joy.get_numhats() > 0)
+                    )
+                    if use_dpad and joy.get_numhats() > 0:
+                        hat_x, _ = joy.get_hat(0)
+                        x_norm = 1.0 if hat_x > 0 else (-1.0 if hat_x < 0 else 0.0)
+                    elif args.x_input == "stick" or (
+                        args.x_input == "auto" and joy.get_numhats() == 0
+                    ):
+                        idx = args.x_axis_index
+                        if 0 <= idx < joy.get_numaxes():
+                            v = float(joy.get_axis(idx))
+                            if abs(v) < args.x_axis_deadzone:
+                                v = 0.0
+                            if args.x_axis_invert:
+                                v = -v
+                            x_norm = float(np.clip(v, -1.0, 1.0))
                 gamepad_cmd = np.array([x_norm, 0.0, 0.0])
                 lift_vel = 0.0
             else:
