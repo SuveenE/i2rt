@@ -854,10 +854,22 @@ if __name__ == "__main__":
         help="Position tolerance (rad) for rail parking (default 0.05).",
     )
     parser.add_argument(
+        "--rail-park-max-vel",
+        type=float,
+        default=0.5,
+        help="Maximum rail velocity (rad/s) during the rail-parking ramp "
+        "(default 0.5). The P-loop output is clipped to +/- this value, so "
+        "lower values give a slower, gentler rail movement up to "
+        "--rail-height. Pass --rail-park-max-vel 0.05 for a very slow crawl.",
+    )
+    parser.add_argument(
         "--rail-park-timeout",
         type=float,
         default=20.0,
-        help="Timeout (seconds) for the rail-parking loop (default 20.0).",
+        help="Minimum timeout (seconds) for the rail-parking loop (default "
+        "20.0). The actual timeout is auto-extended to "
+        "abs(target - start) / --rail-park-max-vel * 1.5 + 5 so a slow "
+        "--rail-park-max-vel does not cause spurious timeouts.",
     )
     parser.add_argument(
         "--rail-park-settle",
@@ -931,14 +943,28 @@ if __name__ == "__main__":
             logger.warning("--rail-height set but linear rail is disabled, skipping parking")
             return False
 
+        # Auto-extend the timeout so a slow --rail-park-max-vel does not cause
+        # spurious failures when the travel distance is large.
+        try:
+            initial_state = vehicle.get_linear_rail_state()
+            initial_pos = initial_state.get("position")
+        except Exception:
+            initial_pos = None
+        start_pos_for_timeout = float(initial_pos) if initial_pos is not None else 0.0
+        auto_timeout_s = (
+            abs(target_pos - start_pos_for_timeout) / max(max_vel_rads, 1e-3) * 1.5 + 5.0
+        )
+        effective_timeout_s = max(timeout_s, auto_timeout_s)
+
         logger.info(
             f"Parking linear rail at {target_pos:.3f} rad "
-            f"(kp={kp}, tol={tol}, timeout={timeout_s}s, settle={settle_s}s)"
+            f"(kp={kp}, tol={tol}, max_vel={max_vel_rads} rad/s, "
+            f"timeout={effective_timeout_s:.1f}s, settle={settle_s}s)"
         )
         start_t = time.time()
         within_t0: Optional[float] = None
         try:
-            while time.time() - start_t < timeout_s:
+            while time.time() - start_t < effective_timeout_s:
                 state = vehicle.get_linear_rail_state()
                 pos = state.get("position")
                 if pos is None:
@@ -989,7 +1015,7 @@ if __name__ == "__main__":
                 time.sleep(0.02)
 
             logger.warning(
-                f"Rail parking did not settle within {timeout_s}s; stopping rail"
+                f"Rail parking did not settle within {effective_timeout_s:.1f}s; stopping rail"
             )
             vehicle.set_linear_rail_velocity(0.0)
             if engage_brake:
@@ -1019,7 +1045,7 @@ if __name__ == "__main__":
             target_pos=args.rail_height,
             kp=args.rail_kp,
             tol=args.rail_tol,
-            max_vel_rads=lift_max_vel,
+            max_vel_rads=args.rail_park_max_vel,
             timeout_s=args.rail_park_timeout,
             settle_s=args.rail_park_settle,
             engage_brake=not args.y_only,
