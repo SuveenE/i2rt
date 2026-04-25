@@ -1060,8 +1060,14 @@ if __name__ == "__main__":
             _resolved_command["source"] = source
 
     def rpc_logged(name: str, handler):
+        # RPC handlers are called many times per second by lerobot-record
+        # (~30 Hz for get_odometry / get_current_command), so per-call enter
+        # /exit logs at INFO level flood the terminal. Keep them at DEBUG and
+        # only emit a WARNING when a call is unexpectedly slow (>50 ms).
+        SLOW_RPC_MS = 50.0
+
         def wrapped(input_dict: Dict[str, Any] | None = None):
-            logger.info(f"RPC enter: {name} on thread {threading.current_thread().name}")
+            logger.debug(f"RPC enter: {name} on thread {threading.current_thread().name}")
             start_t = time.perf_counter()
             try:
                 result = handler(input_dict)
@@ -1070,7 +1076,10 @@ if __name__ == "__main__":
                 logger.exception(f"RPC error: {name} after {dt_ms:.1f} ms")
                 raise
             dt_ms = (time.perf_counter() - start_t) * 1e3
-            logger.info(f"RPC exit: {name} after {dt_ms:.1f} ms")
+            if dt_ms > SLOW_RPC_MS:
+                logger.warning(f"RPC slow: {name} took {dt_ms:.1f} ms")
+            else:
+                logger.debug(f"RPC exit: {name} after {dt_ms:.1f} ms")
             return result
 
         return wrapped

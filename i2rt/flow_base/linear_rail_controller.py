@@ -320,7 +320,9 @@ class LinearRailController:
             try:
                 self.single_motor_control_interface.set_velocity(vel)
                 if vel != 0.0:
-                    logger.info(f"Linear rail velocity set to {vel:.3f} rad/s")
+                    # Active rail-hold P-loop calls this every tick (~30 Hz)
+                    # so logging at INFO floods the terminal. Keep it at DEBUG.
+                    logger.debug(f"Linear rail velocity set to {vel:.3f} rad/s")
             except Exception as e:
                 logger.error(f"Failed to set linear rail velocity: {e}")
                 raise
