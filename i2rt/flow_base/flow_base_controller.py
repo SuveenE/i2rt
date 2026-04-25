@@ -1178,7 +1178,18 @@ if __name__ == "__main__":
             )
 
             # Set target velocity (supports both 3D and 4D)
-            if len(cmd) == 4:
+            if args.x_only:
+                # In x-only mode the rail is parked with the brake engaged
+                # by park_rail_at_height() and we never want to issue rail
+                # commands in the main loop -- LinearRailController.set_velocity
+                # asserts the brake is released, which would spam warnings every
+                # tick at any rail value (including 0). Send a 3D base velocity
+                # so LinearRailVehicle.set_target_velocity takes the base-only
+                # path and skips set_linear_rail_velocity entirely.
+                base_cmd = cmd[:3] * effective_max_vel
+                scaled_cmd = np.append(base_cmd, 0.0)
+                vehicle.set_target_velocity(base_cmd, frame=frame)
+            elif len(cmd) == 4:
                 # 4D: [x, y, theta, linear_rail] - cmd is already normalized [-1, 1]
                 base_cmd = cmd[:3] * effective_max_vel
                 rail_cmd = cmd[3] * lift_max_vel
