@@ -833,6 +833,15 @@ if __name__ == "__main__":
         help="Time (seconds) the rail must stay within --rail-tol of the target "
         "before parking is considered complete (default 0.3).",
     )
+    parser.add_argument(
+        "--no-gamepad",
+        action="store_true",
+        help="Skip gamepad/joystick init entirely. The controller stays alive "
+        "with the RPC server running so other clients (e.g. lerobot-record) "
+        "can still read FlowBase odometry and command base velocities; the "
+        "base will only move in response to remote velocity commands. Useful "
+        "when no joystick is connected or for arm-only teleop tests.",
+    )
 
     CALIBRATION_RETRY_DELAY = 1
     DEADZONE = 0.05  # Deadzone for base control (x, y, theta)
@@ -1084,20 +1093,29 @@ if __name__ == "__main__":
     # interpreter shutdown and emit a noisy
     # "RuntimeError: cannot schedule new futures after interpreter shutdown".
     # Init order: vehicle -> rail park -> gamepad -> server.start().
-    gamepad = Gamepad()
-    joy = gamepad.joy
+    gamepad: Optional[Gamepad] = None
+    joy = None
+    if args.no_gamepad:
+        logger.warning(
+            "--no-gamepad: skipping joystick init. The controller will stay "
+            "alive and serve RPCs, but the base will only move in response to "
+            "remote velocity commands (no D-pad / stick input)."
+        )
+    else:
+        gamepad = Gamepad()
+        joy = gamepad.joy
 
-    # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
-    while True:
-        gamepad._poll()
-        four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
-        if all(np.abs(axis) < DEADZONE for axis in four_axis):
-            logger.info("Joystick is at rest, please check joystick")
-            break
-        else:
-            logger.warning(f"four_axis: {four_axis}")
-            logger.warning("Joystick's rest position is not at the center, please check joystick")
-            time.sleep(CALIBRATION_RETRY_DELAY)
+        # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
+        while True:
+            gamepad._poll()
+            four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
+            if all(np.abs(axis) < DEADZONE for axis in four_axis):
+                logger.info("Joystick is at rest, please check joystick")
+                break
+            else:
+                logger.warning(f"four_axis: {four_axis}")
+                logger.warning("Joystick's rest position is not at the center, please check joystick")
+                time.sleep(CALIBRATION_RETRY_DELAY)
 
     server.start(block=False)
 
@@ -1111,13 +1129,16 @@ if __name__ == "__main__":
     RAIL_LOG_INTERVAL = 1.0  # Log linear rail position every 1 second
     try:
         while True:
-            gamepad_button = gamepad.get_button_reading()
+            if gamepad is not None:
+                gamepad_button = gamepad.get_button_reading()
+            else:
+                gamepad_button = {"key_mode": 0, "key_left_2": 0, "key_left_1": 0}
 
             if args.x_only:
                 # X-only mode: read only the joystick D-pad (hat) for discrete X.
                 # Y, theta, and rail are hard-masked to zero so analog stick drift
                 # and accidental rail input cannot move the robot.
-                if joy.get_numhats() > 0:
+                if joy is not None and joy.get_numhats() > 0:
                     hat_x, _ = joy.get_hat(0)
                 else:
                     hat_x = 0
@@ -1125,9 +1146,12 @@ if __name__ == "__main__":
                 gamepad_cmd = np.array([x_norm, 0.0, 0.0])
                 lift_vel = 0.0
             else:
-                gamepad_cmd = gamepad.get_user_cmd()  # 3D: [x, y, theta]
+                if gamepad is not None:
+                    gamepad_cmd = gamepad.get_user_cmd()  # 3D: [x, y, theta]
+                else:
+                    gamepad_cmd = np.zeros(3)
                 lift_vel = 0.0
-                if joy.get_numaxes() > 3:
+                if joy is not None and joy.get_numaxes() > 3:
                     right_stick_y = joy.get_axis(3)  # Right stick Y-axis
                     # Apply larger deadzone for linear rail to prevent unwanted movement
                     # Invert: up (negative axis value) = positive velocity
@@ -1150,12 +1174,17 @@ if __name__ == "__main__":
 
             if is_remote_command_valid:
                 user_cmd, user_frame = remote_command.get_command()
+                # Without a gamepad, never let the local "override" path win:
+                # remote commands from lerobot-record/etc. are the only input.
                 gamepad_command_override = False
 
                 if gamepad_button["key_left_2"]:
                     gamepad_command_override = True
             else:
-                gamepad_command_override = True
+                # If there is no remote command and no gamepad, hold zero
+                # rather than route a stale gamepad value (gamepad_cmd is
+                # already zeros in that case, but make the intent explicit).
+                gamepad_command_override = gamepad is not None
             if not vehicle.running():
                 print("Motor interface is not running, exiting...")
                 print("Please check the E stop or the motor connection. ")
@@ -1164,8 +1193,8 @@ if __name__ == "__main__":
                 cmd = cmd_4d
                 frame = gamepad_command_frame
             else:
-                cmd = user_cmd
-                frame = user_frame
+                cmd = user_cmd if is_remote_command_valid else cmd_4d
+                frame = user_frame if is_remote_command_valid else gamepad_command_frame
 
             # X-only mode: hard-mask any non-X channel (gamepad or remote) so
             # the only motion possible is base X velocity.
@@ -1179,8 +1208,11 @@ if __name__ == "__main__":
                     cmd[3] = 0.0
 
             if count % 20 == 0:
-                raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
-                axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                if joy is not None:
+                    raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
+                    axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                else:
+                    axes_str = "no-gamepad"
                 sys.stdout.write(f"\rframe: {frame} cmd: {cmd[0]:.1f} {cmd[1]:.1f} {cmd[2]:.1f} rail: {cmd[3]:.1f} | {axes_str}")
                 sys.stdout.flush()
 
