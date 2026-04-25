@@ -871,13 +871,19 @@ if __name__ == "__main__":
         max_vel_rads: float,
         timeout_s: float,
         settle_s: float,
+        engage_brake: bool = True,
     ) -> bool:
-        """Drive the linear rail to ``target_pos`` (motor rad), then stop and engage the brake.
+        """Drive the linear rail to ``target_pos`` (motor rad), then stop.
 
         Runs once at startup after homing has completed (so position 0 = lower limit).
         Uses a simple P-loop on velocity, since the underlying controller is velocity-only.
-        Aborts cleanly on limit-switch hit or timeout, leaving the rail wherever it stopped
-        with the brake re-engaged.
+        Aborts cleanly on limit-switch hit or timeout.
+
+        When ``engage_brake=True`` (default) the rail brake is re-engaged once parked,
+        which is fine when the base is otherwise idle. When the rail brake circuit is
+        wired into the wheel-driver power loop (so engaging the brake also kills the
+        wheel motors), pass ``engage_brake=False`` and arrange for the main control
+        loop to hold the rail at ``target_pos`` with active velocity control instead.
         """
         if vehicle.linear_rail is None:
             logger.warning("--rail-height set but linear rail is disabled, skipping parking")
@@ -921,11 +927,17 @@ if __name__ == "__main__":
                             f"(err={err:.4f} rad)"
                         )
                         vehicle.set_linear_rail_velocity(0.0)
-                        try:
-                            vehicle.linear_rail.set_brake(True)
-                            logger.info("Rail brake re-engaged after parking")
-                        except Exception as e:
-                            logger.error(f"Failed to engage brake after parking: {e}")
+                        if engage_brake:
+                            try:
+                                vehicle.linear_rail.set_brake(True)
+                                logger.info("Rail brake re-engaged after parking")
+                            except Exception as e:
+                                logger.error(f"Failed to engage brake after parking: {e}")
+                        else:
+                            logger.info(
+                                "Rail brake left RELEASED after parking; main loop "
+                                "will hold the rail at target with active velocity control"
+                            )
                         return True
                 else:
                     within_t0 = None
@@ -935,32 +947,47 @@ if __name__ == "__main__":
                 time.sleep(0.02)
 
             logger.warning(
-                f"Rail parking did not settle within {timeout_s}s; stopping and engaging brake"
+                f"Rail parking did not settle within {timeout_s}s; stopping rail"
             )
             vehicle.set_linear_rail_velocity(0.0)
-            try:
-                vehicle.linear_rail.set_brake(True)
-            except Exception as e:
-                logger.error(f"Failed to engage brake after parking timeout: {e}")
+            if engage_brake:
+                try:
+                    vehicle.linear_rail.set_brake(True)
+                except Exception as e:
+                    logger.error(f"Failed to engage brake after parking timeout: {e}")
             return False
         except Exception as e:
             logger.error(f"Rail parking failed: {e}", exc_info=True)
             try:
                 vehicle.set_linear_rail_velocity(0.0)
-                vehicle.linear_rail.set_brake(True)
+                if engage_brake:
+                    vehicle.linear_rail.set_brake(True)
             except Exception:
                 pass
             return False
 
+    # When --x-only is set we must NOT engage the rail brake after parking,
+    # because on this hardware the brake circuit is wired into the wheel-motor
+    # power loop -- engaging the rail brake kills wheel power and the base
+    # cannot drive. Instead, leave the brake released and hold the rail at the
+    # target height with an active P-loop on rail velocity in the main loop.
+    rail_hold_target: Optional[float] = None
     if args.rail_height is not None and not args.no_linear_rail:
-        park_rail_at_height(
+        parked = park_rail_at_height(
             target_pos=args.rail_height,
             kp=args.rail_kp,
             tol=args.rail_tol,
             max_vel_rads=lift_max_vel,
             timeout_s=args.rail_park_timeout,
             settle_s=args.rail_park_settle,
+            engage_brake=not args.x_only,
         )
+        if parked and args.x_only:
+            rail_hold_target = float(args.rail_height)
+            logger.info(
+                f"Rail hold-at-target enabled (target={rail_hold_target:.3f} rad, "
+                f"kp={args.rail_kp}); brake stays released so wheels remain powered."
+            )
 
     class TimeoutRemoteCommand:
         """Unified remote command handler for LinearRailVehicle (base + linear rail)"""
@@ -1179,16 +1206,37 @@ if __name__ == "__main__":
 
             # Set target velocity (supports both 3D and 4D)
             if args.x_only:
-                # In x-only mode the rail is parked with the brake engaged
-                # by park_rail_at_height() and we never want to issue rail
-                # commands in the main loop -- LinearRailController.set_velocity
-                # asserts the brake is released, which would spam warnings every
-                # tick at any rail value (including 0). Send a 3D base velocity
-                # so LinearRailVehicle.set_target_velocity takes the base-only
-                # path and skips set_linear_rail_velocity entirely.
+                # X-only mode. The base always commands only X velocity. The
+                # rail behaviour depends on whether --rail-height was set:
+                #
+                # - rail_hold_target is None: no parking requested, the brake
+                #   was left in whatever state homing produced. Send a 3D
+                #   base velocity so LinearRailVehicle.set_target_velocity
+                #   takes the base-only path and never touches the rail.
+                #
+                # - rail_hold_target is not None: rail was parked but the
+                #   brake is intentionally released (so the wheels stay
+                #   powered). Run an active P-loop on the rail position to
+                #   hold it at the target height, and send a 4D velocity.
                 base_cmd = cmd[:3] * effective_max_vel
-                scaled_cmd = np.append(base_cmd, 0.0)
-                vehicle.set_target_velocity(base_cmd, frame=frame)
+                if rail_hold_target is None:
+                    scaled_cmd = np.append(base_cmd, 0.0)
+                    vehicle.set_target_velocity(base_cmd, frame=frame)
+                else:
+                    rail_hold_cmd = 0.0
+                    try:
+                        rail_state = vehicle.get_linear_rail_state()
+                        rail_pos = rail_state.get("position")
+                        if rail_pos is not None:
+                            rail_err = rail_hold_target - float(rail_pos)
+                            rail_hold_cmd = float(
+                                np.clip(args.rail_kp * rail_err, -lift_max_vel, lift_max_vel)
+                            )
+                    except Exception as e:
+                        if count % 50 == 0:
+                            logger.warning(f"Rail hold: failed to read rail state: {e}")
+                    scaled_cmd = np.append(base_cmd, rail_hold_cmd)
+                    vehicle.set_target_velocity(scaled_cmd, frame=frame)
             elif len(cmd) == 4:
                 # 4D: [x, y, theta, linear_rail] - cmd is already normalized [-1, 1]
                 base_cmd = cmd[:3] * effective_max_vel
