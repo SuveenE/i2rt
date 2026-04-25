@@ -1078,9 +1078,12 @@ if __name__ == "__main__":
         server.bind("get_linear_rail_state", rpc_logged("get_linear_rail_state", vehicle.get_linear_rail_state))
         logger.info("Linear rail APIs bound to server")
 
-    server.start(block=False)
-
-    # Single pygame/joystick init via Gamepad — avoids double-init bugs
+    # Init the gamepad BEFORE starting the RPC server. Gamepad() calls exit()
+    # if no joystick is detected, and if the portal server is already running
+    # at that point, it will accept an incoming client connection during
+    # interpreter shutdown and emit a noisy
+    # "RuntimeError: cannot schedule new futures after interpreter shutdown".
+    # Init order: vehicle -> rail park -> gamepad -> server.start().
     gamepad = Gamepad()
     joy = gamepad.joy
 
@@ -1095,6 +1098,8 @@ if __name__ == "__main__":
             logger.warning(f"four_axis: {four_axis}")
             logger.warning("Joystick's rest position is not at the center, please check joystick")
             time.sleep(CALIBRATION_RETRY_DELAY)
+
+    server.start(block=False)
 
     # Main loop to read joystick inputs
     gamepad_command_frame = "local"
