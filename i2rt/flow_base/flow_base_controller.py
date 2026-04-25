@@ -785,15 +785,117 @@ if __name__ == "__main__":
         help="Address of the RPi GPIO satellite server (e.g. 192.168.1.50:8765). "
         "If not set, falls back to local RPi.GPIO or no-op.",
     )
+    parser.add_argument(
+        "--y-only",
+        action="store_true",
+        help="Restrict gamepad and remote commands to base Y axis only "
+        "(sideways motion). X, theta, and rail commands are forced to zero. "
+        "Use together with lerobot bi_yam_linear_bot.y_only_mode=true for "
+        "Y-only data collection.",
+    )
+    parser.add_argument(
+        "--y-max-vel",
+        type=float,
+        default=0.25,
+        help="Max base Y velocity (m/s) when --y-only is set (default 0.25). "
+        "Full deflection of the chosen input commands +/- this speed.",
+    )
+    parser.add_argument(
+        "--y-input",
+        type=str,
+        default="auto",
+        choices=["auto", "dpad", "stick"],
+        help="Y-only input source. 'auto' (default) uses D-pad if any hat is "
+        "available, otherwise falls back to an analog stick axis. 'dpad' "
+        "forces D-pad (joy.get_hat(0) X component). 'stick' forces an "
+        "analog axis (see --y-axis-index, --y-axis-invert).",
+    )
+    parser.add_argument(
+        "--y-axis-index",
+        type=int,
+        default=0,
+        help="Joystick axis index used for Y velocity when the input source is "
+        "an analog stick (default 0 = left-stick X, sideways motion). "
+        "Common alternatives: 1 = left-stick Y, 2 or 3 = right stick. Run "
+        "the controller and watch the 'aN' values in the status line to "
+        "pick the right one.",
+    )
+    parser.add_argument(
+        "--y-axis-invert",
+        action="store_true",
+        help="Invert the analog Y-axis input. Use this if pushing the stick "
+        "the 'wrong' way drives the base in the unexpected direction.",
+    )
+    parser.add_argument(
+        "--y-axis-deadzone",
+        type=float,
+        default=0.15,
+        help="Deadzone for the analog Y-axis input (default 0.15). Stick "
+        "values with |v| below this map to 0 to avoid drift.",
+    )
+    parser.add_argument(
+        "--rail-height",
+        type=float,
+        default=None,
+        help="Target linear rail position (motor rad, same unit as rail.position) "
+        "to drive to once on startup after homing. Brake re-engages on settle. "
+        "Omit to leave the rail at home (position 0).",
+    )
+    parser.add_argument(
+        "--rail-kp",
+        type=float,
+        default=6.0,
+        help="P-gain for the rail-parking loop when --rail-height is set (default 6.0).",
+    )
+    parser.add_argument(
+        "--rail-tol",
+        type=float,
+        default=0.05,
+        help="Position tolerance (rad) for rail parking (default 0.05).",
+    )
+    parser.add_argument(
+        "--rail-park-max-vel",
+        type=float,
+        default=0.5,
+        help="Maximum rail velocity (rad/s) during the rail-parking ramp "
+        "(default 0.5). The P-loop output is clipped to +/- this value, so "
+        "lower values give a slower, gentler rail movement up to "
+        "--rail-height. Pass --rail-park-max-vel 0.05 for a very slow crawl.",
+    )
+    parser.add_argument(
+        "--rail-park-timeout",
+        type=float,
+        default=20.0,
+        help="Minimum timeout (seconds) for the rail-parking loop (default "
+        "20.0). The actual timeout is auto-extended to "
+        "abs(target - start) / --rail-park-max-vel * 1.5 + 5 so a slow "
+        "--rail-park-max-vel does not cause spurious timeouts.",
+    )
+    parser.add_argument(
+        "--rail-park-settle",
+        type=float,
+        default=0.3,
+        help="Time (seconds) the rail must stay within --rail-tol of the target "
+        "before parking is considered complete (default 0.3).",
+    )
+    parser.add_argument(
+        "--no-gamepad",
+        action="store_true",
+        help="Skip gamepad/joystick init entirely. The controller stays alive "
+        "with the RPC server running so other clients (e.g. lerobot-record) "
+        "can still read FlowBase odometry and command base velocities; the "
+        "base will only move in response to remote velocity commands. Useful "
+        "when no joystick is connected or for arm-only teleop tests.",
+    )
 
     CALIBRATION_RETRY_DELAY = 1
     DEADZONE = 0.05  # Deadzone for base control (x, y, theta)
     RAIL_DEADZONE = 0.15  # Larger deadzone for linear rail to prevent unwanted movement
     args = parser.parse_args()
 
-    max_vel = np.array([0.8, 0.8, 3.0])
-    max_accel = np.array([0.8, 0.8, 3.0])
-    lift_max_vel = 14.0  # Maximum velocity for linear rail (rad/s)
+    max_vel = np.array([0.4, 0.4, 1.5])
+    max_accel = np.array([0.4, 0.4, 1.5])
+    lift_max_vel = 7.0  # Maximum velocity for linear rail (rad/s)
 
     # Use LinearRailVehicle instead of Vehicle
     # Use --no-linear-rail flag if you only have base (8 motors) without linear rail
@@ -815,6 +917,145 @@ if __name__ == "__main__":
             logger.error(f"Error during atexit close: {e}")
 
     atexit.register(close_vehicle)
+
+    def park_rail_at_height(
+        target_pos: float,
+        kp: float,
+        tol: float,
+        max_vel_rads: float,
+        timeout_s: float,
+        settle_s: float,
+        engage_brake: bool = True,
+    ) -> bool:
+        """Drive the linear rail to ``target_pos`` (motor rad), then stop.
+
+        Runs once at startup after homing has completed (so position 0 = lower limit).
+        Uses a simple P-loop on velocity, since the underlying controller is velocity-only.
+        Aborts cleanly on limit-switch hit or timeout.
+
+        When ``engage_brake=True`` (default) the rail brake is re-engaged once parked,
+        which is fine when the base is otherwise idle. When the rail brake circuit is
+        wired into the wheel-driver power loop (so engaging the brake also kills the
+        wheel motors), pass ``engage_brake=False`` and arrange for the main control
+        loop to hold the rail at ``target_pos`` with active velocity control instead.
+        """
+        if vehicle.linear_rail is None:
+            logger.warning("--rail-height set but linear rail is disabled, skipping parking")
+            return False
+
+        # Auto-extend the timeout so a slow --rail-park-max-vel does not cause
+        # spurious failures when the travel distance is large.
+        try:
+            initial_state = vehicle.get_linear_rail_state()
+            initial_pos = initial_state.get("position")
+        except Exception:
+            initial_pos = None
+        start_pos_for_timeout = float(initial_pos) if initial_pos is not None else 0.0
+        auto_timeout_s = (
+            abs(target_pos - start_pos_for_timeout) / max(max_vel_rads, 1e-3) * 1.5 + 5.0
+        )
+        effective_timeout_s = max(timeout_s, auto_timeout_s)
+
+        logger.info(
+            f"Parking linear rail at {target_pos:.3f} rad "
+            f"(kp={kp}, tol={tol}, max_vel={max_vel_rads} rad/s, "
+            f"timeout={effective_timeout_s:.1f}s, settle={settle_s}s)"
+        )
+        start_t = time.time()
+        within_t0: Optional[float] = None
+        try:
+            while time.time() - start_t < effective_timeout_s:
+                state = vehicle.get_linear_rail_state()
+                pos = state.get("position")
+                if pos is None:
+                    logger.warning("Rail parking: no position reading, aborting")
+                    break
+                err = target_pos - float(pos)
+
+                if state.get("upper_limit_triggered") and err > 0:
+                    logger.warning(
+                        f"Rail parking: upper limit hit at pos={pos:.3f} "
+                        f"(target {target_pos:.3f}), stopping"
+                    )
+                    break
+                if state.get("lower_limit_triggered") and err < 0:
+                    logger.warning(
+                        f"Rail parking: lower limit hit at pos={pos:.3f} "
+                        f"(target {target_pos:.3f}), stopping"
+                    )
+                    break
+
+                if abs(err) < tol:
+                    vehicle.set_linear_rail_velocity(0.0)
+                    if within_t0 is None:
+                        within_t0 = time.time()
+                    elif time.time() - within_t0 >= settle_s:
+                        logger.info(
+                            f"Rail parking complete at pos={pos:.3f} rad "
+                            f"(err={err:.4f} rad)"
+                        )
+                        vehicle.set_linear_rail_velocity(0.0)
+                        if engage_brake:
+                            try:
+                                vehicle.linear_rail.set_brake(True)
+                                logger.info("Rail brake re-engaged after parking")
+                            except Exception as e:
+                                logger.error(f"Failed to engage brake after parking: {e}")
+                        else:
+                            logger.info(
+                                "Rail brake left RELEASED after parking; main loop "
+                                "will hold the rail at target with active velocity control"
+                            )
+                        return True
+                else:
+                    within_t0 = None
+                    cmd_vel = float(np.clip(kp * err, -max_vel_rads, max_vel_rads))
+                    vehicle.set_linear_rail_velocity(cmd_vel)
+
+                time.sleep(0.02)
+
+            logger.warning(
+                f"Rail parking did not settle within {effective_timeout_s:.1f}s; stopping rail"
+            )
+            vehicle.set_linear_rail_velocity(0.0)
+            if engage_brake:
+                try:
+                    vehicle.linear_rail.set_brake(True)
+                except Exception as e:
+                    logger.error(f"Failed to engage brake after parking timeout: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Rail parking failed: {e}", exc_info=True)
+            try:
+                vehicle.set_linear_rail_velocity(0.0)
+                if engage_brake:
+                    vehicle.linear_rail.set_brake(True)
+            except Exception:
+                pass
+            return False
+
+    # When --y-only is set we must NOT engage the rail brake after parking,
+    # because on this hardware the brake circuit is wired into the wheel-motor
+    # power loop -- engaging the rail brake kills wheel power and the base
+    # cannot drive. Instead, leave the brake released and hold the rail at the
+    # target height with an active P-loop on rail velocity in the main loop.
+    rail_hold_target: Optional[float] = None
+    if args.rail_height is not None and not args.no_linear_rail:
+        parked = park_rail_at_height(
+            target_pos=args.rail_height,
+            kp=args.rail_kp,
+            tol=args.rail_tol,
+            max_vel_rads=args.rail_park_max_vel,
+            timeout_s=args.rail_park_timeout,
+            settle_s=args.rail_park_settle,
+            engage_brake=not args.y_only,
+        )
+        if parked and args.y_only:
+            rail_hold_target = float(args.rail_height)
+            logger.info(
+                f"Rail hold-at-target enabled (target={rail_hold_target:.3f} rad, "
+                f"kp={args.rail_kp}); brake stays released so wheels remain powered."
+            )
 
     class TimeoutRemoteCommand:
         """Unified remote command handler for LinearRailVehicle (base + linear rail)"""
@@ -878,8 +1119,14 @@ if __name__ == "__main__":
             _resolved_command["source"] = source
 
     def rpc_logged(name: str, handler):
+        # RPC handlers are called many times per second by lerobot-record
+        # (~30 Hz for get_odometry / get_current_command), so per-call enter
+        # /exit logs at INFO level flood the terminal. Keep them at DEBUG and
+        # only emit a WARNING when a call is unexpectedly slow (>50 ms).
+        SLOW_RPC_MS = 50.0
+
         def wrapped(input_dict: Dict[str, Any] | None = None):
-            logger.info(f"RPC enter: {name} on thread {threading.current_thread().name}")
+            logger.debug(f"RPC enter: {name} on thread {threading.current_thread().name}")
             start_t = time.perf_counter()
             try:
                 result = handler(input_dict)
@@ -888,7 +1135,10 @@ if __name__ == "__main__":
                 logger.exception(f"RPC error: {name} after {dt_ms:.1f} ms")
                 raise
             dt_ms = (time.perf_counter() - start_t) * 1e3
-            logger.info(f"RPC exit: {name} after {dt_ms:.1f} ms")
+            if dt_ms > SLOW_RPC_MS:
+                logger.warning(f"RPC slow: {name} took {dt_ms:.1f} ms")
+            else:
+                logger.debug(f"RPC exit: {name} after {dt_ms:.1f} ms")
             return result
 
         return wrapped
@@ -905,23 +1155,57 @@ if __name__ == "__main__":
         server.bind("get_linear_rail_state", rpc_logged("get_linear_rail_state", vehicle.get_linear_rail_state))
         logger.info("Linear rail APIs bound to server")
 
+    # Init the gamepad BEFORE starting the RPC server. Gamepad() calls exit()
+    # if no joystick is detected, and if the portal server is already running
+    # at that point, it will accept an incoming client connection during
+    # interpreter shutdown and emit a noisy
+    # "RuntimeError: cannot schedule new futures after interpreter shutdown".
+    # Init order: vehicle -> rail park -> gamepad -> server.start().
+    gamepad: Optional[Gamepad] = None
+    joy = None
+    if args.no_gamepad:
+        logger.warning(
+            "--no-gamepad: skipping joystick init. The controller will stay "
+            "alive and serve RPCs, but the base will only move in response to "
+            "remote velocity commands (no D-pad / stick input)."
+        )
+    else:
+        gamepad = Gamepad()
+        joy = gamepad.joy
+
+        if args.y_only:
+            n_axes = joy.get_numaxes()
+            n_hats = joy.get_numhats()
+            if args.y_input == "dpad":
+                src = f"D-pad (hat 0 of {n_hats})"
+            elif args.y_input == "stick":
+                src = (
+                    f"analog axis {args.y_axis_index} (of {n_axes}, "
+                    f"deadzone={args.y_axis_deadzone}, invert={args.y_axis_invert})"
+                )
+            else:  # auto
+                if n_hats > 0:
+                    src = f"D-pad (auto: hat 0 of {n_hats}); stick fallback unused"
+                else:
+                    src = (
+                        f"analog axis {args.y_axis_index} (auto: no hats; "
+                        f"deadzone={args.y_axis_deadzone}, invert={args.y_axis_invert})"
+                    )
+            logger.info(f"--y-only Y input source: {src}")
+
+        # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
+        while True:
+            gamepad._poll()
+            four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
+            if all(np.abs(axis) < DEADZONE for axis in four_axis):
+                logger.info("Joystick is at rest, please check joystick")
+                break
+            else:
+                logger.warning(f"four_axis: {four_axis}")
+                logger.warning("Joystick's rest position is not at the center, please check joystick")
+                time.sleep(CALIBRATION_RETRY_DELAY)
+
     server.start(block=False)
-
-    # Single pygame/joystick init via Gamepad — avoids double-init bugs
-    gamepad = Gamepad()
-    joy = gamepad.joy
-
-    # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
-    while True:
-        gamepad._poll()
-        four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
-        if all(np.abs(axis) < DEADZONE for axis in four_axis):
-            logger.info("Joystick is at rest, please check joystick")
-            break
-        else:
-            logger.warning(f"four_axis: {four_axis}")
-            logger.warning("Joystick's rest position is not at the center, please check joystick")
-            time.sleep(CALIBRATION_RETRY_DELAY)
 
     # Main loop to read joystick inputs
     gamepad_command_frame = "local"
@@ -933,8 +1217,55 @@ if __name__ == "__main__":
     RAIL_LOG_INTERVAL = 1.0  # Log linear rail position every 1 second
     try:
         while True:
-            gamepad_cmd = gamepad.get_user_cmd()  # 3D: [x, y, theta]
-            gamepad_button = gamepad.get_button_reading()
+            if gamepad is not None:
+                gamepad_button = gamepad.get_button_reading()
+            else:
+                gamepad_button = {"key_mode": 0, "key_left_2": 0, "key_left_1": 0}
+
+            if args.y_only:
+                # Y-only mode: read a single user input for Y velocity
+                # (sideways), then hard-mask X, theta, and rail to zero so
+                # stick drift and accidental input on the other channels
+                # cannot move the robot.
+                #
+                # Input source is selected by --y-input:
+                #   dpad  : joy.get_hat(0) X component -> {-1, 0, +1}
+                #   stick : joy.get_axis(--y-axis-index) with deadzone
+                #   auto  : D-pad if any hat exists, otherwise stick fallback.
+                y_norm = 0.0
+                if joy is not None:
+                    use_dpad = (
+                        args.y_input == "dpad"
+                        or (args.y_input == "auto" and joy.get_numhats() > 0)
+                    )
+                    if use_dpad and joy.get_numhats() > 0:
+                        hat_x, _ = joy.get_hat(0)
+                        y_norm = 1.0 if hat_x > 0 else (-1.0 if hat_x < 0 else 0.0)
+                    elif args.y_input == "stick" or (
+                        args.y_input == "auto" and joy.get_numhats() == 0
+                    ):
+                        idx = args.y_axis_index
+                        if 0 <= idx < joy.get_numaxes():
+                            v = float(joy.get_axis(idx))
+                            if abs(v) < args.y_axis_deadzone:
+                                v = 0.0
+                            if args.y_axis_invert:
+                                v = -v
+                            y_norm = float(np.clip(v, -1.0, 1.0))
+                gamepad_cmd = np.array([0.0, y_norm, 0.0])
+                lift_vel = 0.0
+            else:
+                if gamepad is not None:
+                    gamepad_cmd = gamepad.get_user_cmd()  # 3D: [x, y, theta]
+                else:
+                    gamepad_cmd = np.zeros(3)
+                lift_vel = 0.0
+                if joy is not None and joy.get_numaxes() > 3:
+                    right_stick_y = joy.get_axis(3)  # Right stick Y-axis
+                    # Apply larger deadzone for linear rail to prevent unwanted movement
+                    # Invert: up (negative axis value) = positive velocity
+                    if np.abs(right_stick_y) > RAIL_DEADZONE:
+                        lift_vel = -right_stick_y  # Invert: up (negative axis) = positive velocity
 
             if gamepad_button["key_mode"] and not last_gampad_mode_togged:
                 last_gampad_mode_togged = True
@@ -946,26 +1277,23 @@ if __name__ == "__main__":
             if gamepad_button["key_left_1"]:
                 vehicle.reset_odometry()
 
-            lift_vel = 0.0
-            if joy.get_numaxes() > 3:
-                right_stick_y = joy.get_axis(3)  # Right stick Y-axis
-                # Apply larger deadzone for linear rail to prevent unwanted movement
-                # Invert: up (negative axis value) = positive velocity
-                if np.abs(right_stick_y) > RAIL_DEADZONE:
-                    lift_vel = -right_stick_y  # Invert: up (negative axis) = positive velocity
-
             cmd_4d = np.append(gamepad_cmd, lift_vel)
 
             is_remote_command_valid = remote_command.is_command_valid()
 
             if is_remote_command_valid:
                 user_cmd, user_frame = remote_command.get_command()
+                # Without a gamepad, never let the local "override" path win:
+                # remote commands from lerobot-record/etc. are the only input.
                 gamepad_command_override = False
 
                 if gamepad_button["key_left_2"]:
                     gamepad_command_override = True
             else:
-                gamepad_command_override = True
+                # If there is no remote command and no gamepad, hold zero
+                # rather than route a stale gamepad value (gamepad_cmd is
+                # already zeros in that case, but make the intent explicit).
+                gamepad_command_override = gamepad is not None
             if not vehicle.running():
                 print("Motor interface is not running, exiting...")
                 print("Please check the E stop or the motor connection. ")
@@ -974,11 +1302,26 @@ if __name__ == "__main__":
                 cmd = cmd_4d
                 frame = gamepad_command_frame
             else:
-                cmd = user_cmd
-                frame = user_frame
+                cmd = user_cmd if is_remote_command_valid else cmd_4d
+                frame = user_frame if is_remote_command_valid else gamepad_command_frame
+
+            # Y-only mode: hard-mask any non-Y channel (gamepad or remote) so
+            # the only motion possible is base Y velocity (sideways).
+            if args.y_only:
+                cmd = np.array(cmd, dtype=float, copy=True)
+                if len(cmd) >= 1:
+                    cmd[0] = 0.0
+                if len(cmd) >= 3:
+                    cmd[2] = 0.0
+                if len(cmd) >= 4:
+                    cmd[3] = 0.0
+
             if count % 20 == 0:
-                raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
-                axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                if joy is not None:
+                    raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
+                    axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                else:
+                    axes_str = "no-gamepad"
                 sys.stdout.write(f"\rframe: {frame} cmd: {cmd[0]:.1f} {cmd[1]:.1f} {cmd[2]:.1f} rail: {cmd[3]:.1f} | {axes_str}")
                 sys.stdout.flush()
 
@@ -1000,17 +1343,57 @@ if __name__ == "__main__":
 
             count += 1
 
+            # When --y-only is set, use the safer y_max_vel for the Y scaling
+            # so a D-pad press / stick deflection yields a calm, constant
+            # speed; X/theta scales become irrelevant since cmd[0]/cmd[2]
+            # were forced to zero above.
+            effective_max_vel = (
+                np.array([max_vel[0], args.y_max_vel, max_vel[2]]) if args.y_only else max_vel
+            )
+
             # Set target velocity (supports both 3D and 4D)
-            if len(cmd) == 4:
+            if args.y_only:
+                # Y-only mode. The base always commands only Y velocity. The
+                # rail behaviour depends on whether --rail-height was set:
+                #
+                # - rail_hold_target is None: no parking requested, the brake
+                #   was left in whatever state homing produced. Send a 3D
+                #   base velocity so LinearRailVehicle.set_target_velocity
+                #   takes the base-only path and never touches the rail.
+                #
+                # - rail_hold_target is not None: rail was parked but the
+                #   brake is intentionally released (so the wheels stay
+                #   powered). Run an active P-loop on the rail position to
+                #   hold it at the target height, and send a 4D velocity.
+                base_cmd = cmd[:3] * effective_max_vel
+                if rail_hold_target is None:
+                    scaled_cmd = np.append(base_cmd, 0.0)
+                    vehicle.set_target_velocity(base_cmd, frame=frame)
+                else:
+                    rail_hold_cmd = 0.0
+                    try:
+                        rail_state = vehicle.get_linear_rail_state()
+                        rail_pos = rail_state.get("position")
+                        if rail_pos is not None:
+                            rail_err = rail_hold_target - float(rail_pos)
+                            rail_hold_cmd = float(
+                                np.clip(args.rail_kp * rail_err, -lift_max_vel, lift_max_vel)
+                            )
+                    except Exception as e:
+                        if count % 50 == 0:
+                            logger.warning(f"Rail hold: failed to read rail state: {e}")
+                    scaled_cmd = np.append(base_cmd, rail_hold_cmd)
+                    vehicle.set_target_velocity(scaled_cmd, frame=frame)
+            elif len(cmd) == 4:
                 # 4D: [x, y, theta, linear_rail] - cmd is already normalized [-1, 1]
-                base_cmd = cmd[:3] * max_vel
+                base_cmd = cmd[:3] * effective_max_vel
                 rail_cmd = cmd[3] * lift_max_vel
                 scaled_cmd = np.append(base_cmd, rail_cmd)
                 vehicle.set_target_velocity(scaled_cmd, frame=frame)
             else:
                 # 3D: [x, y, theta] (backward compatibility)
-                scaled_cmd = np.append(cmd * max_vel, 0.0)
-                vehicle.set_target_velocity(cmd * max_vel, frame=frame)
+                scaled_cmd = np.append(cmd * effective_max_vel, 0.0)
+                vehicle.set_target_velocity(cmd * effective_max_vel, frame=frame)
 
             update_resolved_command(
                 velocity=scaled_cmd.tolist(),
