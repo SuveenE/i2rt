@@ -786,50 +786,51 @@ if __name__ == "__main__":
         "If not set, falls back to local RPi.GPIO or no-op.",
     )
     parser.add_argument(
-        "--x-only",
+        "--y-only",
         action="store_true",
-        help="Restrict gamepad and remote commands to base X axis only. "
-        "Reads only the joystick D-pad (left/right) for discrete +/-X velocity; "
-        "Y, theta, and rail commands are forced to zero. Use together with "
-        "lerobot bi_yam_linear_bot.x_only_mode=true for X-only data collection.",
+        help="Restrict gamepad and remote commands to base Y axis only "
+        "(sideways motion). X, theta, and rail commands are forced to zero. "
+        "Use together with lerobot bi_yam_linear_bot.y_only_mode=true for "
+        "Y-only data collection.",
     )
     parser.add_argument(
-        "--x-max-vel",
+        "--y-max-vel",
         type=float,
         default=0.25,
-        help="Max base X velocity (m/s) when --x-only is set (default 0.25). "
+        help="Max base Y velocity (m/s) when --y-only is set (default 0.25). "
         "Full deflection of the chosen input commands +/- this speed.",
     )
     parser.add_argument(
-        "--x-input",
+        "--y-input",
         type=str,
         default="auto",
         choices=["auto", "dpad", "stick"],
-        help="X-only input source. 'auto' (default) uses D-pad if any hat is "
+        help="Y-only input source. 'auto' (default) uses D-pad if any hat is "
         "available, otherwise falls back to an analog stick axis. 'dpad' "
-        "forces D-pad (joy.get_hat(0)). 'stick' forces an analog axis "
-        "(see --x-axis-index, --x-axis-invert).",
+        "forces D-pad (joy.get_hat(0) X component). 'stick' forces an "
+        "analog axis (see --y-axis-index, --y-axis-invert).",
     )
     parser.add_argument(
-        "--x-axis-index",
+        "--y-axis-index",
         type=int,
-        default=1,
-        help="Joystick axis index used for X velocity when the input source is "
-        "an analog stick (default 1 = left-stick Y). Common alternatives: "
-        "0 = left-stick X, 2 or 3 = right stick. Run the controller and "
-        "watch the 'aN' values in the status line to pick the right one.",
+        default=0,
+        help="Joystick axis index used for Y velocity when the input source is "
+        "an analog stick (default 0 = left-stick X, sideways motion). "
+        "Common alternatives: 1 = left-stick Y, 2 or 3 = right stick. Run "
+        "the controller and watch the 'aN' values in the status line to "
+        "pick the right one.",
     )
     parser.add_argument(
-        "--x-axis-invert",
+        "--y-axis-invert",
         action="store_true",
-        help="Invert the analog X-axis input. Use this if pushing the stick "
+        help="Invert the analog Y-axis input. Use this if pushing the stick "
         "the 'wrong' way drives the base in the unexpected direction.",
     )
     parser.add_argument(
-        "--x-axis-deadzone",
+        "--y-axis-deadzone",
         type=float,
         default=0.15,
-        help="Deadzone for the analog X-axis input (default 0.15). Stick "
+        help="Deadzone for the analog Y-axis input (default 0.15). Stick "
         "values with |v| below this map to 0 to avoid drift.",
     )
     parser.add_argument(
@@ -1007,7 +1008,7 @@ if __name__ == "__main__":
                 pass
             return False
 
-    # When --x-only is set we must NOT engage the rail brake after parking,
+    # When --y-only is set we must NOT engage the rail brake after parking,
     # because on this hardware the brake circuit is wired into the wheel-motor
     # power loop -- engaging the rail brake kills wheel power and the base
     # cannot drive. Instead, leave the brake released and hold the rail at the
@@ -1021,9 +1022,9 @@ if __name__ == "__main__":
             max_vel_rads=lift_max_vel,
             timeout_s=args.rail_park_timeout,
             settle_s=args.rail_park_settle,
-            engage_brake=not args.x_only,
+            engage_brake=not args.y_only,
         )
-        if parked and args.x_only:
+        if parked and args.y_only:
             rail_hold_target = float(args.rail_height)
             logger.info(
                 f"Rail hold-at-target enabled (target={rail_hold_target:.3f} rad, "
@@ -1146,25 +1147,25 @@ if __name__ == "__main__":
         gamepad = Gamepad()
         joy = gamepad.joy
 
-        if args.x_only:
+        if args.y_only:
             n_axes = joy.get_numaxes()
             n_hats = joy.get_numhats()
-            if args.x_input == "dpad":
+            if args.y_input == "dpad":
                 src = f"D-pad (hat 0 of {n_hats})"
-            elif args.x_input == "stick":
+            elif args.y_input == "stick":
                 src = (
-                    f"analog axis {args.x_axis_index} (of {n_axes}, "
-                    f"deadzone={args.x_axis_deadzone}, invert={args.x_axis_invert})"
+                    f"analog axis {args.y_axis_index} (of {n_axes}, "
+                    f"deadzone={args.y_axis_deadzone}, invert={args.y_axis_invert})"
                 )
             else:  # auto
                 if n_hats > 0:
                     src = f"D-pad (auto: hat 0 of {n_hats}); stick fallback unused"
                 else:
                     src = (
-                        f"analog axis {args.x_axis_index} (auto: no hats; "
-                        f"deadzone={args.x_axis_deadzone}, invert={args.x_axis_invert})"
+                        f"analog axis {args.y_axis_index} (auto: no hats; "
+                        f"deadzone={args.y_axis_deadzone}, invert={args.y_axis_invert})"
                     )
-            logger.info(f"--x-only X input source: {src}")
+            logger.info(f"--y-only Y input source: {src}")
 
         # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
         while True:
@@ -1195,36 +1196,37 @@ if __name__ == "__main__":
             else:
                 gamepad_button = {"key_mode": 0, "key_left_2": 0, "key_left_1": 0}
 
-            if args.x_only:
-                # X-only mode: read a single user input for X velocity, then
-                # hard-mask Y, theta, and rail to zero so stick drift and
-                # accidental rail input cannot move the robot.
+            if args.y_only:
+                # Y-only mode: read a single user input for Y velocity
+                # (sideways), then hard-mask X, theta, and rail to zero so
+                # stick drift and accidental input on the other channels
+                # cannot move the robot.
                 #
-                # Input source is selected by --x-input:
-                #   dpad  : joy.get_hat(0) -> {-1, 0, +1}
-                #   stick : joy.get_axis(--x-axis-index) with deadzone
+                # Input source is selected by --y-input:
+                #   dpad  : joy.get_hat(0) X component -> {-1, 0, +1}
+                #   stick : joy.get_axis(--y-axis-index) with deadzone
                 #   auto  : D-pad if any hat exists, otherwise stick fallback.
-                x_norm = 0.0
+                y_norm = 0.0
                 if joy is not None:
                     use_dpad = (
-                        args.x_input == "dpad"
-                        or (args.x_input == "auto" and joy.get_numhats() > 0)
+                        args.y_input == "dpad"
+                        or (args.y_input == "auto" and joy.get_numhats() > 0)
                     )
                     if use_dpad and joy.get_numhats() > 0:
                         hat_x, _ = joy.get_hat(0)
-                        x_norm = 1.0 if hat_x > 0 else (-1.0 if hat_x < 0 else 0.0)
-                    elif args.x_input == "stick" or (
-                        args.x_input == "auto" and joy.get_numhats() == 0
+                        y_norm = 1.0 if hat_x > 0 else (-1.0 if hat_x < 0 else 0.0)
+                    elif args.y_input == "stick" or (
+                        args.y_input == "auto" and joy.get_numhats() == 0
                     ):
-                        idx = args.x_axis_index
+                        idx = args.y_axis_index
                         if 0 <= idx < joy.get_numaxes():
                             v = float(joy.get_axis(idx))
-                            if abs(v) < args.x_axis_deadzone:
+                            if abs(v) < args.y_axis_deadzone:
                                 v = 0.0
-                            if args.x_axis_invert:
+                            if args.y_axis_invert:
                                 v = -v
-                            x_norm = float(np.clip(v, -1.0, 1.0))
-                gamepad_cmd = np.array([x_norm, 0.0, 0.0])
+                            y_norm = float(np.clip(v, -1.0, 1.0))
+                gamepad_cmd = np.array([0.0, y_norm, 0.0])
                 lift_vel = 0.0
             else:
                 if gamepad is not None:
@@ -1277,12 +1279,12 @@ if __name__ == "__main__":
                 cmd = user_cmd if is_remote_command_valid else cmd_4d
                 frame = user_frame if is_remote_command_valid else gamepad_command_frame
 
-            # X-only mode: hard-mask any non-X channel (gamepad or remote) so
-            # the only motion possible is base X velocity.
-            if args.x_only:
+            # Y-only mode: hard-mask any non-Y channel (gamepad or remote) so
+            # the only motion possible is base Y velocity (sideways).
+            if args.y_only:
                 cmd = np.array(cmd, dtype=float, copy=True)
-                if len(cmd) >= 2:
-                    cmd[1] = 0.0
+                if len(cmd) >= 1:
+                    cmd[0] = 0.0
                 if len(cmd) >= 3:
                     cmd[2] = 0.0
                 if len(cmd) >= 4:
@@ -1315,16 +1317,17 @@ if __name__ == "__main__":
 
             count += 1
 
-            # When --x-only is set, use the safer x_max_vel for the X scaling
-            # so a D-pad press yields a calm, constant speed; Y/theta scales
-            # become irrelevant since cmd[1]/cmd[2] were forced to zero above.
+            # When --y-only is set, use the safer y_max_vel for the Y scaling
+            # so a D-pad press / stick deflection yields a calm, constant
+            # speed; X/theta scales become irrelevant since cmd[0]/cmd[2]
+            # were forced to zero above.
             effective_max_vel = (
-                np.array([args.x_max_vel, max_vel[1], max_vel[2]]) if args.x_only else max_vel
+                np.array([max_vel[0], args.y_max_vel, max_vel[2]]) if args.y_only else max_vel
             )
 
             # Set target velocity (supports both 3D and 4D)
-            if args.x_only:
-                # X-only mode. The base always commands only X velocity. The
+            if args.y_only:
+                # Y-only mode. The base always commands only Y velocity. The
                 # rail behaviour depends on whether --rail-height was set:
                 #
                 # - rail_hold_target is None: no parking requested, the brake
