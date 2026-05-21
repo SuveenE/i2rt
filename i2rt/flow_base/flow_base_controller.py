@@ -911,6 +911,18 @@ if __name__ == "__main__":
     # interpreter shutdown and emit a noisy
     # "RuntimeError: cannot schedule new futures after interpreter shutdown".
     # Init order: vehicle -> rail park -> gamepad -> server.start().
+    #
+    # On headless / SSH boxes pygame.init() races with udev/HID/audio
+    # subsystem probes and can hang indefinitely when called immediately
+    # after CAN/GPIO init. Sleeping here gives those probes time to settle
+    # before SDL touches them. Empirically the suveen/x-only-linear-bot
+    # flow only worked because rail-parking introduced a similar delay.
+    GAMEPAD_INIT_DELAY_S = 10.0
+    logger.info(
+        f"Waiting {GAMEPAD_INIT_DELAY_S:.0f}s before gamepad init "
+        "(headless pygame.init() race workaround)"
+    )
+    time.sleep(GAMEPAD_INIT_DELAY_S)
     gamepad = Gamepad()
     joy = gamepad.joy
 
