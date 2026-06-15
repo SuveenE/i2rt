@@ -59,6 +59,12 @@ class Gamepad:
     def __init__(self):
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
+        # By default SDL installs SIGINT/SIGTERM handlers that swallow Ctrl+C
+        # (it posts an internal SDL_QUIT event instead of letting Python raise
+        # KeyboardInterrupt). Running headless we never consume that event, so
+        # Ctrl+C appears to hang. Disable SDL's signal handlers so the normal
+        # KeyboardInterrupt path works. Must be set before pygame.init().
+        os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
         pygame.init()
         pygame.joystick.init()
         if pygame.joystick.get_count() == 0:

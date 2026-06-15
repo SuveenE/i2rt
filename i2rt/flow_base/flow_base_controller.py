@@ -766,6 +766,8 @@ if __name__ == "__main__":
 
     os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
     os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
+    # Stop SDL from hijacking SIGINT/SIGTERM so Ctrl+C raises KeyboardInterrupt.
+    os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
 
     import pygame
 
