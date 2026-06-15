@@ -1,20 +1,56 @@
 #!/usr/bin/env python3
 import ctypes
+import glob
 import os
+import sys
 
 import numpy as np
 import pygame
 
 
+def _pygame_sdl2_paths():
+    """Yield candidate paths to the *exact* SDL2 library that pygame loaded.
+
+    A pip-installed pygame bundles its own SDL2 (under ``pygame.libs`` on
+    Linux or ``pygame/.dylibs`` on macOS). That bundled copy is a different
+    library instance than the system ``libSDL2`` reachable by name, and they
+    do NOT share state. We must poll the instance pygame actually opened the
+    joystick on, otherwise ``joy.get_axis()`` reads never update.
+    """
+    # 1. The library already mapped into this process (most reliable on Linux).
+    if sys.platform.startswith("linux"):
+        try:
+            with open("/proc/self/maps", encoding="utf-8") as f:
+                for line in f:
+                    path = line.rstrip().split(" ", maxsplit=5)[-1]
+                    if "libSDL2" in path and os.path.isfile(path):
+                        yield path
+        except OSError:
+            pass
+
+    # 2. Libraries bundled inside the pygame package directory.
+    pkg_dir = os.path.dirname(pygame.__file__)
+    for pattern in (
+        os.path.join(pkg_dir, "..", "pygame.libs", "libSDL2*"),
+        os.path.join(pkg_dir, ".dylibs", "libSDL2*"),
+        os.path.join(pkg_dir, "libSDL2*"),
+        os.path.join(pkg_dir, "SDL2*.dll"),
+    ):
+        yield from glob.glob(pattern)
+
+
 def _load_sdl2():
-    """Load SDL2 shared library for direct joystick polling."""
-    for name in ("libSDL2-2.0.so.0", "libSDL2-2.0.dylib", "SDL2.dll", "libSDL2.so"):
+    """Load the SDL2 shared library pygame uses, for direct joystick polling."""
+    candidates = list(_pygame_sdl2_paths())
+    # Fall back to system-wide names only if pygame's own copy can't be found.
+    candidates += ["libSDL2-2.0.so.0", "libSDL2-2.0.dylib", "SDL2.dll", "libSDL2.so"]
+    for name in candidates:
         try:
             lib = ctypes.CDLL(name)
             lib.SDL_JoystickUpdate.argtypes = []
             lib.SDL_JoystickUpdate.restype = None
             return lib
-        except OSError:
+        except (OSError, AttributeError):
             continue
     return None
 
@@ -48,11 +84,16 @@ class Gamepad:
         print(f"Number of Buttons: {self.joy.get_numbuttons()}")
 
     def _poll(self) -> None:
-        """Update joystick state by polling hardware directly."""
+        """Update joystick state by polling hardware directly.
+
+        ``pygame.event.pump()`` keeps pygame's own SDL instance refreshed (and
+        works as long as background events are allowed). The direct
+        ``SDL_JoystickUpdate()`` call is an additional, event-system-independent
+        refresh of the same instance pygame uses.
+        """
+        pygame.event.pump()
         if self._sdl2:
             self._sdl2.SDL_JoystickUpdate()
-        else:
-            pygame.event.pump()
 
     def get_button_reading(self) -> dict[str, int]:
         self._poll()
