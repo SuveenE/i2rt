@@ -70,14 +70,14 @@ class Gamepad:
         self.joy = pygame.joystick.Joystick(0)
         self.joy.init()
 
-        # SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS via env var is unreliable
-        # when other threads are running (motor control, RPC server, etc.).
-        # Bypass the event system entirely: disable SDL joystick events and
-        # poll the hardware directly with SDL_JoystickUpdate().
+        # Keep SDL joystick events ENABLED so that pygame.event.pump() auto-
+        # refreshes axis state (this is what the working test_gamepad.py does).
+        # We additionally call SDL_JoystickUpdate() directly in _poll() on the
+        # SAME SDL2 instance pygame loaded, as event-system-independent
+        # insurance when background threads (motor control, RPC) are running.
+        # NOTE: do NOT disable joystick events here — doing so stops pump() from
+        # updating axes and was the cause of user_cmd reading all zeros.
         self._sdl2 = _load_sdl2()
-        if self._sdl2:
-            SDL_DISABLE = 0
-            self._sdl2.SDL_JoystickEventState(SDL_DISABLE)
 
         print(f"Joystick Name: {self.joy.get_name()}")
         print(f"Number of Axes: {self.joy.get_numaxes()}")
