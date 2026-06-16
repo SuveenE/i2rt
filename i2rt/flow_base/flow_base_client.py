@@ -77,10 +77,22 @@ class FlowBaseClient:
             self.command["target_velocity"][3] = velocity
 
     def close(self) -> None:
-        """Stop the client and clean up resources."""
+        """Stop the client and clean up resources.
+
+        `portal.Client` runs a non-daemon background socket thread (plus an OS
+        pipe) that is only torn down by `Client.close()`. Stopping the heartbeat
+        thread alone leaves that socket thread alive, which wedges process
+        teardown after recording (the process hangs after logging "Exiting").
+        We close it explicitly with a bounded timeout so a stuck connection
+        can't block shutdown.
+        """
         self.running = False
         if self._thread.is_alive():
             self._thread.join(timeout=1.0)
+        try:
+            self.client.close(timeout=2.0)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
