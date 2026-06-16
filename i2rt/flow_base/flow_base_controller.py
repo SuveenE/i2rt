@@ -6,10 +6,12 @@ from i2rt.robots.robot import Robot, RobotType
 os.environ["CTR_TARGET"] = "Hardware"  # pylint: disable=wrong-import-position
 
 import atexit
+import gc
 import logging
 import math
 import os
 import queue
+import signal
 import sys
 import threading
 import time
@@ -546,6 +548,16 @@ class Vehicle(Robot):
             logger.info("Vehicle closed successfully")
         except Exception as e:
             logger.error(f"Vehicle close error: {e}")
+        finally:
+            # Release ruckig (nanobind) objects while the control loop is stopped
+            # so their refcounts drop to zero before the C++ extension module is
+            # torn down. Otherwise nanobind prints "leaked N instances" warnings
+            # at interpreter shutdown. Must run after stop_control() joins the
+            # control loop thread so nothing is still touching them.
+            for attr in ("otg", "otg_inp", "otg_out", "otg_res"):
+                if hasattr(self, attr):
+                    delattr(self, attr)
+            gc.collect()
 
 
 class LinearRailVehicle(Vehicle):
@@ -941,6 +953,17 @@ if __name__ == "__main__":
             time.sleep(CALIBRATION_RETRY_DELAY)
 
     server.start(block=False)
+
+    # portal.Server installs its own SIGINT/SIGTERM handlers when its worker
+    # threads spin up, which swallows Ctrl+C (the process appears to hang).
+    # Reinstall our own handlers *after* server.start() so they take precedence
+    # and turn the signal back into a KeyboardInterrupt that the main loop's
+    # try/except below handles for a clean shutdown.
+    def _raise_keyboard_interrupt(signum, frame) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _raise_keyboard_interrupt)
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
 
     # Main loop to read joystick inputs
     gamepad_command_frame = "local"
