@@ -3,6 +3,7 @@ import ctypes
 import glob
 import os
 import sys
+import time
 
 import numpy as np
 import pygame
@@ -56,7 +57,7 @@ def _load_sdl2():
 
 
 class Gamepad:
-    def __init__(self):
+    def __init__(self, connect_timeout: float = 15.0, retry_delay: float = 0.5):
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
         # By default SDL installs SIGINT/SIGTERM handlers that swallow Ctrl+C
@@ -67,11 +68,22 @@ class Gamepad:
         os.environ["SDL_NO_SIGNAL_HANDLERS"] = "1"
         pygame.init()
         pygame.joystick.init()
-        if pygame.joystick.get_count() == 0:
-            print("No joystick/gamepad connected!")
-            exit()
-        else:
-            print(f"Detected {pygame.joystick.get_count()} joystick(s).")
+
+        # SDL often fails to enumerate the joystick on the very first scan,
+        # especially headless / right after CAN/GPIO init races the HID probe.
+        # Instead of giving up immediately (which forced a manual restart),
+        # re-scan the joystick subsystem in a loop until one appears or we time
+        # out, so the controller connects reliably on the first launch.
+        deadline = time.time() + connect_timeout
+        while pygame.joystick.get_count() == 0:
+            if time.time() >= deadline:
+                print(f"No joystick/gamepad connected after {connect_timeout:.0f}s!")
+                raise RuntimeError("No joystick/gamepad detected")
+            pygame.event.pump()  # let SDL process pending device-added events
+            pygame.joystick.quit()
+            time.sleep(retry_delay)
+            pygame.joystick.init()
+        print(f"Detected {pygame.joystick.get_count()} joystick(s).")
 
         self.joy = pygame.joystick.Joystick(0)
         self.joy.init()

@@ -382,7 +382,9 @@ class Vehicle(Robot):
     def stop_control(self) -> None:
         self.control_loop_running = False
         if self.control_loop_thread is not None:
-            self.control_loop_thread.join()
+            # Bounded join: the loop is a daemon thread, so if it is wedged in a
+            # blocking CAN read we must not block shutdown waiting on it forever.
+            self.control_loop_thread.join(timeout=2.0)
             self.control_loop_thread = None
 
     def control_loop(self) -> None:
@@ -1062,11 +1064,47 @@ if __name__ == "__main__":
 
             time.sleep(0.02)
     except KeyboardInterrupt:
-        print("Exiting...")
+        print("\nExiting...")
     finally:
-        # Ensure close is always called, even on Ctrl+C
+        # Guaranteed shutdown. Several things here can block: vehicle.close()
+        # touches the CAN bus and issues remote GPIO/brake RPCs, the control
+        # loop join can stall on a wedged read, and portal's background socket
+        # threads can keep the interpreter from ever reaching exit. To make sure
+        # Ctrl+C always returns the terminal, we (1) arm a watchdog that force
+        # exits if cleanup takes too long, (2) make a second Ctrl+C force exit
+        # immediately, and (3) os._exit() the moment graceful cleanup is done so
+        # nothing lingering can hold the process open.
+        SHUTDOWN_TIMEOUT_S = 8.0
+
+        def _force_exit(*_args) -> None:
+            os._exit(0)
+
+        watchdog = threading.Timer(SHUTDOWN_TIMEOUT_S, _force_exit)
+        watchdog.daemon = True
+        watchdog.start()
+
+        # A second Ctrl+C (or SIGTERM) during shutdown bails out right away.
+        signal.signal(signal.SIGINT, _force_exit)
+        signal.signal(signal.SIGTERM, _force_exit)
+
+        try:
+            server.close()
+        except Exception as e:
+            logger.error(f"Error closing RPC server: {e}")
         try:
             vehicle.close()
         except Exception as e:
             logger.error(f"Error during close: {e}")
-        pygame.quit()
+        try:
+            gamepad.close()
+        except Exception:
+            pass
+        try:
+            pygame.quit()
+        except Exception:
+            pass
+
+        watchdog.cancel()
+        # Hard exit so portal's daemon socket threads / atexit double-close can't
+        # keep the process (and the terminal) alive.
+        os._exit(0)
