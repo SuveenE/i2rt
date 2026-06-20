@@ -807,8 +807,8 @@ if __name__ == "__main__":
     RAIL_DEADZONE = 0.15  # Larger deadzone for linear rail to prevent unwanted movement
     args = parser.parse_args()
 
-    max_vel = np.array([0.4, 0.4, 1.5])
-    max_accel = np.array([0.4, 0.4, 1.5])
+    max_vel = np.array([1.0, 1.0, np.pi])
+    max_accel = np.array([0.8, 0.8, 3.0])
     lift_max_vel = 7.0  # Maximum velocity for linear rail (rad/s)
 
     # Use LinearRailVehicle instead of Vehicle
