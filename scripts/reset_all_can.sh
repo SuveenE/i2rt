@@ -11,7 +11,10 @@ reset_can_interface() {
     local iface=$1
     echo "Resetting CAN interface: $iface"
     $SUDO ip link set "$iface" down
-    $SUDO ip link set "$iface" up type can bitrate 1000000
+    # restart-ms 100 lets the kernel auto-recover the controller from a bus-off
+    # state (e.g. transient bus errors / brief disconnects) instead of leaving
+    # the interface DOWN until the next manual reset.
+    $SUDO ip link set "$iface" up type can bitrate 1000000 restart-ms 100
 }
 
 # Get all CAN interfaces
@@ -29,4 +32,4 @@ for iface in $can_interfaces; do
     reset_can_interface "$iface"
 done
 
-echo "All CAN interfaces have been reset with bitrate 1000000."
+echo "All CAN interfaces have been reset with bitrate 1000000 and restart-ms 100."
