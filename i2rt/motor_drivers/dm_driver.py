@@ -477,6 +477,14 @@ class DMChainCanInterface(MotorChain):
     def _joint_position_sim_to_real_idx(self, joint_position_sim: float, idx: int) -> float:
         return joint_position_sim * self.motor_direction[idx] + self.motor_offset[idx]
 
+    def set_zero_position(self, motor_idx: int) -> None:
+        """Set a motor's current position as zero by shifting its software offset.
+
+        Leaves the raw absolute-position accumulator intact so wrap-around unwrapping keeps working.
+        """
+        with self.state_lock:
+            self.motor_offset[motor_idx] = self.absolute_positions[motor_idx]
+
     def _motor_on(self) -> None:
         motor_feedback = []
         for _ in range(7):
