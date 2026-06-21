@@ -120,6 +120,7 @@ class LinearRailController:
         auto_home: bool = True,
         homing_timeout: float = HOMING_TIMEOUT,
         total_stroke_m: float = 1.0,
+        max_vel_mps: Optional[float] = 0.5,
     ):
         """Initialize linear rail controller
 
@@ -133,6 +134,12 @@ class LinearRailController:
             total_stroke_m: Physical stroke between upper and lower limit switches, in meters.
                 Used during the top-then-bottom startup calibration to convert motor radians
                 into linear meters: meters_per_rad = total_stroke_m / (theta_upper - theta_lower).
+            max_vel_mps: Hard cap on the rail's linear speed, in m/s. Enforced in
+                ``set_velocity`` once ``meters_per_rad`` is known (after calibration) so the
+                rail's top speed is independent of motor gearing and identical on both the
+                joystick and remote command paths. ``None`` disables the m/s cap (only the
+                ``rail_speed`` rad/s limit applies). Homing moves bypass ``set_velocity`` so
+                they are never throttled by this.
         """
         self.single_motor_control_interface = single_motor_control_interface
         self.gpio_backend = gpio_backend if gpio_backend is not None else _default_gpio_backend()
@@ -140,6 +147,7 @@ class LinearRailController:
         self.auto_home = auto_home
         self.homing_timeout = homing_timeout
         self.total_stroke_m = total_stroke_m
+        self.max_vel_mps = max_vel_mps
         self.meters_per_rad: Optional[float] = None
 
         self.initialized = False
@@ -381,7 +389,20 @@ class LinearRailController:
         assert self.initialized, "Linear rail must be initialized before setting velocity"
         assert not self.brake_on, "Brake must be released before setting velocity"
 
-        vel = float(np.clip(vel, -self.rail_speed, self.rail_speed))
+        # Clamp the commanded motor velocity. Once calibrated we cap by the linear
+        # speed limit (m/s), which makes the rail's top speed a fixed physical value
+        # independent of motor gearing and applies to every caller (joystick +
+        # remote). This is authoritative — we do NOT also clip to rail_speed, since a
+        # high-gearing rail can need >rail_speed rad/s to reach max_vel_mps. Before
+        # calibration (meters_per_rad is None) we fall back to the rad/s ceiling so a
+        # command is never unbounded. Homing moves bypass set_velocity, so they are
+        # never throttled here.
+        mpr = self.meters_per_rad
+        if self.max_vel_mps is not None and mpr:
+            max_rad_s = abs(self.max_vel_mps / mpr)
+            vel = float(np.clip(vel, -max_rad_s, max_rad_s))
+        else:
+            vel = float(np.clip(vel, -self.rail_speed, self.rail_speed))
 
         with self._lock:
             current_time = time.time()

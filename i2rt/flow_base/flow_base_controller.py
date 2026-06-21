@@ -577,6 +577,7 @@ class LinearRailVehicle(Vehicle):
         enable_linear_rail: bool = True,
         gpio_host: Optional[str] = None,
         linear_rail_stroke_m: float = 1.0,
+        linear_rail_max_vel_mps: float = 0.5,
     ):
         """
         Initialize LinearRailVehicle with optional linear rail lift module.
@@ -584,7 +585,9 @@ class LinearRailVehicle(Vehicle):
         Args:
             vehicle_max_vel: Maximum velocity for vehicle base (x, y, theta)
             vehicle_max_accel: Maximum acceleration for vehicle base (x, y, theta)
-            lift_max_vel: Maximum velocity for linear rail lift (rad/s)
+            lift_max_vel: Linear rail homing speed in motor rad/s (applied as
+                rail_speed * HOMING_SPEED_RATIO during homing). Not a clip on user
+                commands — those are bounded in m/s by linear_rail_max_vel_mps.
             channel: CAN channel name for motor communication
             auto_start: Whether to automatically start the control loop
             lift_motor_id: Motor ID for the linear rail motor
@@ -598,6 +601,9 @@ class LinearRailVehicle(Vehicle):
                 or a no-op backend when RPi.GPIO is unavailable.
             linear_rail_stroke_m: Physical stroke between the upper and lower limit
                 switches, in meters. Used to calibrate meters_per_rad during homing.
+            linear_rail_max_vel_mps: Hard cap on the rail's linear speed, in m/s, enforced
+                by the controller once calibrated (applies to both joystick and remote
+                commands).
         """
         # Create base motor list (8 motors: 4 casters * 2 motors each)
         motor_list = []
@@ -664,6 +670,7 @@ class LinearRailVehicle(Vehicle):
                 auto_home=False,  # Don't auto home yet, initialize GPIO first
                 homing_timeout=homing_timeout,
                 total_stroke_m=linear_rail_stroke_m,
+                max_vel_mps=linear_rail_max_vel_mps,
             )
 
             # Initialize GPIO early, before starting homing
@@ -757,13 +764,20 @@ class LinearRailVehicle(Vehicle):
         """Set the velocity of the linear rail.
 
         Args:
-            velocity: Target velocity in rad/s
+            velocity: Target linear velocity in m/s (positive = up). Converted to motor
+                rad/s using the signed calibration factor meters_per_rad so the sign stays
+                correct regardless of motor direction.
         """
         if self.linear_rail is None:
             logger.warning("Linear rail not available, ignoring velocity command")
             return
+        meters_per_rad = self.linear_rail.meters_per_rad
+        if meters_per_rad is None:
+            logger.warning("Linear rail not calibrated (meters_per_rad is None), ignoring velocity command")
+            return
+        motor_velocity = velocity / meters_per_rad  # m/s / (m/rad) = rad/s
         try:
-            self.linear_rail.set_velocity(velocity)
+            self.linear_rail.set_velocity(motor_velocity)
         except AssertionError as e:
             logger.warning(f"Linear rail velocity command rejected: {e}")
         except Exception as e:
@@ -814,7 +828,8 @@ if __name__ == "__main__":
     # Base velocity limits, aligned with FlowBaseClient DEFAULT_MAX_VEL_{X,Y,THETA}.
     max_vel = np.array([0.5, 0.5, np.pi / 2])
     max_accel = np.array([0.8, 0.8, 3.0])
-    lift_max_vel = 7.0  # Maximum velocity for linear rail (rad/s)
+    lift_max_vel = 7.0  # Linear rail homing speed (motor rad/s); not a clip on user commands
+    lift_max_vel_ms = 0.5  # Gamepad stick -> linear rail velocity scaling (m/s)
 
     # Use LinearRailVehicle instead of Vehicle
     # Use --no-linear-rail flag if you only have base (8 motors) without linear rail
@@ -1049,11 +1064,20 @@ if __name__ == "__main__":
 
             count += 1
 
-            # Set target velocity (supports both 3D and 4D)
+            # Set target velocity (supports both 3D and 4D).
+            #
+            # Base axes are always normalized [-1, 1] (gamepad sticks and remote
+            # clients alike) and scaled here by max_vel. The linear rail is in
+            # physical m/s: gamepad sticks are scaled by lift_max_vel_ms, while
+            # remote clients (e.g. lerobot) already send m/s and pass through
+            # unscaled. LinearRailVehicle.set_linear_rail_velocity then converts
+            # m/s to motor rad/s via the calibrated meters_per_rad.
             if len(cmd) == 4:
-                # 4D: [x, y, theta, linear_rail] - cmd is already normalized [-1, 1]
                 base_cmd = cmd[:3] * max_vel
-                rail_cmd = cmd[3] * lift_max_vel
+                if gamepad_command_override:
+                    rail_cmd = cmd[3] * lift_max_vel_ms  # stick [-1, 1] -> m/s
+                else:
+                    rail_cmd = cmd[3]  # remote rail command already in m/s
                 scaled_cmd = np.append(base_cmd, rail_cmd)
                 vehicle.set_target_velocity(scaled_cmd, frame=frame)
             else:
