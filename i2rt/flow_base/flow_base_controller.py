@@ -576,6 +576,7 @@ class LinearRailVehicle(Vehicle):
         homing_timeout: float = 30.0,
         enable_linear_rail: bool = True,
         gpio_host: Optional[str] = None,
+        linear_rail_stroke_m: float = 1.0,
     ):
         """
         Initialize LinearRailVehicle with optional linear rail lift module.
@@ -595,6 +596,8 @@ class LinearRailVehicle(Vehicle):
                 If provided, brake and limit switch GPIO operations are performed
                 remotely via portal RPC.  If *None*, falls back to local RPi.GPIO
                 or a no-op backend when RPi.GPIO is unavailable.
+            linear_rail_stroke_m: Physical stroke between the upper and lower limit
+                switches, in meters. Used to calibrate meters_per_rad during homing.
         """
         # Create base motor list (8 motors: 4 casters * 2 motors each)
         motor_list = []
@@ -660,6 +663,7 @@ class LinearRailVehicle(Vehicle):
                 rail_speed=lift_max_vel,
                 auto_home=False,  # Don't auto home yet, initialize GPIO first
                 homing_timeout=homing_timeout,
+                total_stroke_m=linear_rail_stroke_m,
             )
 
             # Initialize GPIO early, before starting homing
