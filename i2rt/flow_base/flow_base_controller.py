@@ -811,7 +811,8 @@ if __name__ == "__main__":
     RAIL_DEADZONE = 0.15  # Larger deadzone for linear rail to prevent unwanted movement
     args = parser.parse_args()
 
-    max_vel = np.array([1.0, 1.0, np.pi])
+    # Base velocity limits, aligned with FlowBaseClient DEFAULT_MAX_VEL_{X,Y,THETA}.
+    max_vel = np.array([0.5, 0.5, np.pi / 2])
     max_accel = np.array([0.8, 0.8, 3.0])
     lift_max_vel = 7.0  # Maximum velocity for linear rail (rad/s)
 
