@@ -427,7 +427,7 @@ class DMChainCanInterface(MotorChain):
         self.commands = starting_command
         self.command_lock = threading.Lock()
 
-        self.start_thread_flag = start_thread
+        self.start_thread_flag = False
         if start_thread:
             self.start_thread()
 
