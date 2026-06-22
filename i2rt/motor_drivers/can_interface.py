@@ -51,7 +51,7 @@ class CanInterface:
         for _ in range(max_retry):
             try:
                 self.bus.send(message)
-                response = self._receive_message(motor_id, timeout=0.01)
+                response = self._receive_message(motor_id, timeout=0.2)
 
                 if expected_id is None:
                     expected_id = self.receive_mode.get_receive_id(motor_id)
