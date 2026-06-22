@@ -57,7 +57,16 @@ def _load_sdl2():
 
 
 class Gamepad:
-    def __init__(self, connect_timeout: float = 15.0, retry_delay: float = 0.5):
+    def __init__(self, connect_timeout: float | None = None, retry_delay: float = 0.5):
+        """Initialize the gamepad, polling at startup until one is connected.
+
+        Args:
+            connect_timeout: How long to wait for a joystick to appear at
+                startup before giving up. ``None`` (the default) means wait
+                forever, so the controller comes up the moment the gamepad is
+                plugged in instead of exiting and requiring a manual restart.
+            retry_delay: Delay between connection scans during the initial wait.
+        """
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
         # By default SDL installs SIGINT/SIGTERM handlers that swallow Ctrl+C
@@ -71,14 +80,19 @@ class Gamepad:
 
         # SDL often fails to enumerate the joystick on the very first scan,
         # especially headless / right after CAN/GPIO init races the HID probe.
-        # Instead of giving up immediately (which forced a manual restart),
-        # re-scan the joystick subsystem in a loop until one appears or we time
-        # out, so the controller connects reliably on the first launch.
-        deadline = time.time() + connect_timeout
+        # Instead of giving up after a fixed timeout (which forced a manual
+        # restart), re-scan the joystick subsystem in a loop until one appears.
+        # By default we wait forever so the controller connects on first launch.
+        deadline = None if connect_timeout is None else time.time() + connect_timeout
+        last_msg = 0.0
         while pygame.joystick.get_count() == 0:
-            if time.time() >= deadline:
+            now = time.time()
+            if deadline is not None and now >= deadline:
                 print(f"No joystick/gamepad connected after {connect_timeout:.0f}s!")
                 raise RuntimeError("No joystick/gamepad detected")
+            if now - last_msg >= 5.0:
+                print("Waiting for joystick/gamepad to connect...")
+                last_msg = now
             pygame.event.pump()  # let SDL process pending device-added events
             pygame.joystick.quit()
             time.sleep(retry_delay)
