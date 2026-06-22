@@ -819,6 +819,12 @@ if __name__ == "__main__":
         help="Address of the RPi GPIO satellite server (e.g. 192.168.1.50:8765). "
         "If not set, falls back to local RPi.GPIO or no-op.",
     )
+    parser.add_argument(
+        "--no-gamepad",
+        action="store_true",
+        help="Run in remote-only mode: skip gamepad init/calibration and drive "
+        "the vehicle solely from remote RPC commands.",
+    )
 
     CALIBRATION_RETRY_DELAY = 1
     DEADZONE = 0.05  # Deadzone for base control (x, y, theta)
@@ -953,26 +959,31 @@ if __name__ == "__main__":
     # after CAN/GPIO init. Sleeping here gives those probes time to settle
     # before SDL touches them. Empirically the suveen/x-only-linear-bot
     # flow only worked because rail-parking introduced a similar delay.
-    GAMEPAD_INIT_DELAY_S = 10.0
-    logger.info(
-        f"Waiting {GAMEPAD_INIT_DELAY_S:.0f}s before gamepad init "
-        "(headless pygame.init() race workaround)"
-    )
-    time.sleep(GAMEPAD_INIT_DELAY_S)
-    gamepad = Gamepad()
-    joy = gamepad.joy
+    gamepad = None
+    joy = None
+    if args.no_gamepad:
+        logger.info("Running in remote-only mode (--no-gamepad): skipping gamepad init/calibration")
+    else:
+        GAMEPAD_INIT_DELAY_S = 10.0
+        logger.info(
+            f"Waiting {GAMEPAD_INIT_DELAY_S:.0f}s before gamepad init "
+            "(headless pygame.init() race workaround)"
+        )
+        time.sleep(GAMEPAD_INIT_DELAY_S)
+        gamepad = Gamepad()
+        joy = gamepad.joy
 
-    # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
-    while True:
-        gamepad._poll()
-        four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
-        if all(np.abs(axis) < DEADZONE for axis in four_axis):
-            logger.info("Joystick is at rest, please check joystick")
-            break
-        else:
-            logger.warning(f"four_axis: {four_axis}")
-            logger.warning("Joystick's rest position is not at the center, please check joystick")
-            time.sleep(CALIBRATION_RETRY_DELAY)
+        # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
+        while True:
+            gamepad._poll()
+            four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
+            if all(np.abs(axis) < DEADZONE for axis in four_axis):
+                logger.info("Joystick is at rest, please check joystick")
+                break
+            else:
+                logger.warning(f"four_axis: {four_axis}")
+                logger.warning("Joystick's rest position is not at the center, please check joystick")
+                time.sleep(CALIBRATION_RETRY_DELAY)
 
     server.start(block=False)
 
@@ -997,32 +1008,40 @@ if __name__ == "__main__":
     RAIL_LOG_INTERVAL = 1.0  # Log linear rail position every 1 second
     try:
         while True:
-            gamepad_cmd = gamepad.get_user_cmd()  # 3D: [x, y, theta]
-            gamepad_button = gamepad.get_button_reading()
+            cmd_4d = np.zeros(4)
+            if gamepad is not None:
+                gamepad_cmd = gamepad.get_user_cmd()  # 3D: [x, y, theta]
+                gamepad_button = gamepad.get_button_reading()
 
-            if gamepad_button["key_mode"] and not last_gampad_mode_togged:
-                last_gampad_mode_togged = True
-                gamepad_command_frame = "global" if gamepad_command_frame == "local" else "local"
-            else:
-                last_gampad_mode_togged = False
+                if gamepad_button["key_mode"] and not last_gampad_mode_togged:
+                    last_gampad_mode_togged = True
+                    gamepad_command_frame = "global" if gamepad_command_frame == "local" else "local"
+                else:
+                    last_gampad_mode_togged = False
 
-            # Handle reset odometry (key_left_1)
-            if gamepad_button["key_left_1"]:
-                vehicle.reset_odometry()
+                # Handle reset odometry (key_left_1)
+                if gamepad_button["key_left_1"]:
+                    vehicle.reset_odometry()
 
-            lift_vel = 0.0
-            if joy.get_numaxes() > 3:
-                right_stick_y = joy.get_axis(3)  # Right stick Y-axis
-                # Apply larger deadzone for linear rail to prevent unwanted movement
-                # Invert: up (negative axis value) = positive velocity
-                if np.abs(right_stick_y) > RAIL_DEADZONE:
-                    lift_vel = -right_stick_y  # Invert: up (negative axis) = positive velocity
+                lift_vel = 0.0
+                if joy.get_numaxes() > 3:
+                    right_stick_y = joy.get_axis(3)  # Right stick Y-axis
+                    # Apply larger deadzone for linear rail to prevent unwanted movement
+                    # Invert: up (negative axis value) = positive velocity
+                    if np.abs(right_stick_y) > RAIL_DEADZONE:
+                        lift_vel = -right_stick_y  # Invert: up (negative axis) = positive velocity
 
-            cmd_4d = np.append(gamepad_cmd, lift_vel)
+                cmd_4d = np.append(gamepad_cmd, lift_vel)
 
             is_remote_command_valid = remote_command.is_command_valid()
 
-            if is_remote_command_valid:
+            if gamepad is None:
+                # Remote-only mode: always defer to remote commands. When no valid
+                # remote command is present, cmd_4d stays zero so the vehicle stops.
+                gamepad_command_override = False
+                if is_remote_command_valid:
+                    user_cmd, user_frame = remote_command.get_command()
+            elif is_remote_command_valid:
                 user_cmd, user_frame = remote_command.get_command()
                 gamepad_command_override = False
 
@@ -1034,15 +1053,18 @@ if __name__ == "__main__":
                 print("Motor interface is not running, exiting...")
                 print("Please check the E stop or the motor connection. ")
                 break
-            if gamepad_command_override:
-                cmd = cmd_4d
-                frame = gamepad_command_frame
-            else:
+            if not gamepad_command_override and is_remote_command_valid:
                 cmd = user_cmd
                 frame = user_frame
+            else:
+                cmd = cmd_4d
+                frame = gamepad_command_frame
             if count % 20 == 0:
-                raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
-                axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                if gamepad is not None:
+                    raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
+                    axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                else:
+                    axes_str = "no gamepad"
                 sys.stdout.write(f"\rframe: {frame} cmd: {cmd[0]:.1f} {cmd[1]:.1f} {cmd[2]:.1f} rail: {cmd[3]:.1f} | {axes_str}")
                 sys.stdout.flush()
 
@@ -1125,7 +1147,8 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Error during close: {e}")
         try:
-            gamepad.close()
+            if gamepad is not None:
+                gamepad.close()
         except Exception:
             pass
         try:
