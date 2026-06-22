@@ -418,6 +418,11 @@ class DMChainCanInterface(MotorChain):
         else:
             self.same_bus_device_driver = None
 
+        if self.same_bus_device_driver is not None:
+            drained = self.motor_interface._drain_bus(timeout_s=0.2)
+            if drained:
+                logging.info(f"Drained {drained} stale frames before motor bring-up")
+
         self.absolute_positions = None
         self._motor_on()
         starting_command = []
@@ -487,8 +492,7 @@ class DMChainCanInterface(MotorChain):
 
     def _motor_on(self) -> None:
         motor_feedback = []
-        for _ in range(7):
-            self.motor_interface.try_receive_message(timeout=0.001)
+        self.motor_interface._drain_bus(timeout_s=0.05)
         for motor_id, motor_type in self.motor_list:
             logging.info(f"Turning on motor_id: {motor_id}, motor_type: {motor_type}")
             time.sleep(0.003)
