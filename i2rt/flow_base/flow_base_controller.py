@@ -852,13 +852,13 @@ if __name__ == "__main__":
         "meters_per_rad=...' log line. The rail still homes down to the lower limit to zero.",
     )
     parser.add_argument(
-        "--rail-vel",
+        "--rail-max-vel",
         type=float,
-        default=None,
-        help="One-shot mode: after homing, drive the linear rail at this velocity (m/s, "
-        "positive = up) until Ctrl+C, then stop and exit. Skips the gamepad and "
-        "remote-control server. The command is still bounded by linear_rail_max_vel_mps "
-        "and the limit switches.",
+        default=0.5,
+        help="Hard cap on the linear rail's speed, in m/s (positive). Wired through to "
+        "LinearRailController.max_vel_mps and enforced once the rail is calibrated, on "
+        "both the joystick and remote command paths. Homing moves bypass this cap "
+        "(default: 0.5).",
     )
 
     CALIBRATION_RETRY_DELAY = 1
@@ -883,6 +883,7 @@ if __name__ == "__main__":
         enable_linear_rail=not args.no_linear_rail,
         gpio_host=args.gpio_host,
         linear_rail_meters_per_rad=args.rail_meters_per_rad,
+        linear_rail_max_vel_mps=args.rail_max_vel,
     )
 
     # Register cleanup function to ensure brake is engaged on exit
@@ -893,33 +894,6 @@ if __name__ == "__main__":
             logger.error(f"Error during atexit close: {e}")
 
     atexit.register(close_vehicle)
-
-    # One-shot mode: drive the rail at a fixed velocity for a fixed duration, then exit.
-    # Runs after init (which homes/calibrates) and skips the gamepad + RPC server entirely.
-    if args.rail_vel is not None:
-        if args.no_linear_rail or vehicle.linear_rail is None:
-            logger.error("--rail-vel requires the linear rail to be enabled (remove --no-linear-rail)")
-            vehicle.close()
-            os._exit(1)
-
-        logger.info(
-            f"One-shot rail move: {args.rail_vel:.3f} m/s until Ctrl+C "
-            "(re-applying command at 20 Hz to avoid the rail's command timeout)"
-        )
-        try:
-            # Re-apply faster than COMMAND_TIMEOUT (0.25s) so the rail doesn't stop itself.
-            while True:
-                vehicle.set_linear_rail_velocity(args.rail_vel)
-                time.sleep(0.05)
-        except KeyboardInterrupt:
-            logger.info("One-shot rail move interrupted")
-        finally:
-            try:
-                vehicle.set_linear_rail_velocity(0.0)
-            except Exception as e:
-                logger.error(f"Failed to stop rail after one-shot move: {e}")
-            vehicle.close()
-        os._exit(0)
 
     class TimeoutRemoteCommand:
         """Unified remote command handler for LinearRailVehicle (base + linear rail)"""
