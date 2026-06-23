@@ -121,6 +121,7 @@ class LinearRailController:
         homing_timeout: float = HOMING_TIMEOUT,
         total_stroke_m: float = 1.0,
         max_vel_mps: Optional[float] = 0.5,
+        meters_per_rad_override: Optional[float] = None,
     ):
         """Initialize linear rail controller
 
@@ -140,6 +141,14 @@ class LinearRailController:
                 joystick and remote command paths. ``None`` disables the m/s cap (only the
                 ``rail_speed`` rad/s limit applies). Homing moves bypass ``set_velocity`` so
                 they are never throttled by this.
+            meters_per_rad_override: If provided, skip the upper-limit phase of startup
+                calibration and use this (fixed, signed) value as ``meters_per_rad`` instead
+                of measuring it. ``meters_per_rad`` is a mechanical constant (lead-screw
+                pitch / gearing), so once measured it can be reused. Useful when a payload
+                (e.g. a pole) blocks upward travel to the upper limit switch. The rail still
+                homes DOWN to the lower limit to establish the encoder zero, so the value
+                must carry the same sign as the originally calibrated one (copy it from a
+                previous "Linear rail calibrated: ... meters_per_rad=..." log line).
         """
         self.single_motor_control_interface = single_motor_control_interface
         self.gpio_backend = gpio_backend if gpio_backend is not None else _default_gpio_backend()
@@ -148,6 +157,7 @@ class LinearRailController:
         self.homing_timeout = homing_timeout
         self.total_stroke_m = total_stroke_m
         self.max_vel_mps = max_vel_mps
+        self.meters_per_rad_override = meters_per_rad_override
         self.meters_per_rad: Optional[float] = None
 
         self.initialized = False
@@ -225,6 +235,28 @@ class LinearRailController:
         try:
             # Release brake before any motion
             self.set_brake(engaged=False)
+
+            # Override path: a payload (e.g. a pole) blocks upward travel, so we
+            # can't reach the upper limit to measure meters_per_rad. Since it's a
+            # fixed mechanical constant, use the supplied value and only home DOWN
+            # to the lower limit to establish the encoder zero.
+            if self.meters_per_rad_override is not None:
+                with self._lock:
+                    already_at_lower = self.lower_limit_triggered
+                if not already_at_lower:
+                    self._move_until_limit(direction="down")
+                time.sleep(0.2)  # settle so the encoder reading is stable
+                with self._lock:
+                    self.meters_per_rad = self.meters_per_rad_override
+                logger.info(
+                    f"Linear rail using provided meters_per_rad={self.meters_per_rad:.6f} m/rad "
+                    f"(upper-limit calibration skipped)"
+                )
+                # Zero encoder at lower limit so encoder 0 == bottom of travel
+                self._set_home_zero()
+                with self._lock:
+                    self.initialized = True
+                return
 
             # Phase 1: drive to upper limit (skip if already triggered there)
             with self._lock:

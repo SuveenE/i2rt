@@ -578,6 +578,7 @@ class LinearRailVehicle(Vehicle):
         gpio_host: Optional[str] = None,
         linear_rail_stroke_m: float = 1.0,
         linear_rail_max_vel_mps: float = 0.5,
+        linear_rail_meters_per_rad: Optional[float] = None,
     ):
         """
         Initialize LinearRailVehicle with optional linear rail lift module.
@@ -604,6 +605,10 @@ class LinearRailVehicle(Vehicle):
             linear_rail_max_vel_mps: Hard cap on the rail's linear speed, in m/s, enforced
                 by the controller once calibrated (applies to both joystick and remote
                 commands).
+            linear_rail_meters_per_rad: If provided, skip the upper-limit calibration phase
+                and use this fixed (signed) value as meters_per_rad. Lets the rail come up
+                when a payload (e.g. a pole) blocks travel to the upper limit switch; it
+                still homes down to the lower limit for the encoder zero.
         """
         # Create base motor list (8 motors: 4 casters * 2 motors each)
         motor_list = []
@@ -671,6 +676,7 @@ class LinearRailVehicle(Vehicle):
                 homing_timeout=homing_timeout,
                 total_stroke_m=linear_rail_stroke_m,
                 max_vel_mps=linear_rail_max_vel_mps,
+                meters_per_rad_override=linear_rail_meters_per_rad,
             )
 
             # Initialize GPIO early, before starting homing
@@ -825,6 +831,15 @@ if __name__ == "__main__":
         help="Run in remote-only mode: skip gamepad init/calibration and drive "
         "the vehicle solely from remote RPC commands.",
     )
+    parser.add_argument(
+        "--rail-meters-per-rad",
+        type=float,
+        default=None,
+        help="Skip the upper-limit calibration and use this fixed (signed) meters_per_rad "
+        "value instead. Use when a payload (e.g. a pole) blocks the rail from reaching the "
+        "upper limit switch. Copy the value from a previous 'Linear rail calibrated: ... "
+        "meters_per_rad=...' log line. The rail still homes down to the lower limit to zero.",
+    )
 
     CALIBRATION_RETRY_DELAY = 1
     DEADZONE = 0.05  # Deadzone for base control (x, y, theta)
@@ -847,6 +862,7 @@ if __name__ == "__main__":
         auto_home=True,
         enable_linear_rail=not args.no_linear_rail,
         gpio_host=args.gpio_host,
+        linear_rail_meters_per_rad=args.rail_meters_per_rad,
     )
 
     # Register cleanup function to ensure brake is engaged on exit
