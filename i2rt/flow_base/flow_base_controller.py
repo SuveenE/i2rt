@@ -811,6 +811,15 @@ if __name__ == "__main__":
 
     from i2rt.utils.gamepad_utils import Gamepad
 
+    def str2bool(value: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value.lower() in ("true", "t", "yes", "y", "1"):
+            return True
+        if value.lower() in ("false", "f", "no", "n", "0"):
+            return False
+        raise argparse.ArgumentTypeError(f"Expected a boolean value (true/false), got {value!r}")
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--channel", type=str, default="can0")
     parser.add_argument(
@@ -826,10 +835,12 @@ if __name__ == "__main__":
         "If not set, falls back to local RPi.GPIO or no-op.",
     )
     parser.add_argument(
-        "--no-gamepad",
-        action="store_true",
-        help="Run in remote-only mode: skip gamepad init/calibration and drive "
-        "the vehicle solely from remote RPC commands.",
+        "--gamepad",
+        type=str2bool,
+        default=True,
+        metavar="{true,false}",
+        help="Whether to use a gamepad. Pass 'false' for remote-only mode: skip gamepad "
+        "init/calibration and drive the vehicle solely from remote RPC commands (default: true).",
     )
     parser.add_argument(
         "--rail-meters-per-rad",
@@ -839,6 +850,15 @@ if __name__ == "__main__":
         "value instead. Use when a payload (e.g. a pole) blocks the rail from reaching the "
         "upper limit switch. Copy the value from a previous 'Linear rail calibrated: ... "
         "meters_per_rad=...' log line. The rail still homes down to the lower limit to zero.",
+    )
+    parser.add_argument(
+        "--rail-vel",
+        type=float,
+        default=None,
+        help="One-shot mode: after homing, drive the linear rail at this velocity (m/s, "
+        "positive = up) until Ctrl+C, then stop and exit. Skips the gamepad and "
+        "remote-control server. The command is still bounded by linear_rail_max_vel_mps "
+        "and the limit switches.",
     )
 
     CALIBRATION_RETRY_DELAY = 1
@@ -873,6 +893,33 @@ if __name__ == "__main__":
             logger.error(f"Error during atexit close: {e}")
 
     atexit.register(close_vehicle)
+
+    # One-shot mode: drive the rail at a fixed velocity for a fixed duration, then exit.
+    # Runs after init (which homes/calibrates) and skips the gamepad + RPC server entirely.
+    if args.rail_vel is not None:
+        if args.no_linear_rail or vehicle.linear_rail is None:
+            logger.error("--rail-vel requires the linear rail to be enabled (remove --no-linear-rail)")
+            vehicle.close()
+            os._exit(1)
+
+        logger.info(
+            f"One-shot rail move: {args.rail_vel:.3f} m/s until Ctrl+C "
+            "(re-applying command at 20 Hz to avoid the rail's command timeout)"
+        )
+        try:
+            # Re-apply faster than COMMAND_TIMEOUT (0.25s) so the rail doesn't stop itself.
+            while True:
+                vehicle.set_linear_rail_velocity(args.rail_vel)
+                time.sleep(0.05)
+        except KeyboardInterrupt:
+            logger.info("One-shot rail move interrupted")
+        finally:
+            try:
+                vehicle.set_linear_rail_velocity(0.0)
+            except Exception as e:
+                logger.error(f"Failed to stop rail after one-shot move: {e}")
+            vehicle.close()
+        os._exit(0)
 
     class TimeoutRemoteCommand:
         """Unified remote command handler for LinearRailVehicle (base + linear rail)"""
@@ -977,8 +1024,8 @@ if __name__ == "__main__":
     # flow only worked because rail-parking introduced a similar delay.
     gamepad = None
     joy = None
-    if args.no_gamepad:
-        logger.info("Running in remote-only mode (--no-gamepad): skipping gamepad init/calibration")
+    if not args.gamepad:
+        logger.info("Running in remote-only mode (--gamepad false): skipping gamepad init/calibration")
     else:
         GAMEPAD_INIT_DELAY_S = 10.0
         logger.info(
