@@ -870,7 +870,11 @@ if __name__ == "__main__":
     max_vel = np.array([0.5, 0.5, np.pi / 2])
     max_accel = np.array([0.8, 0.8, 3.0])
     lift_max_vel = 7.0  # Linear rail homing speed (motor rad/s); not a clip on user commands
-    lift_max_vel_ms = 0.5  # Gamepad stick -> linear rail velocity scaling (m/s)
+    # Gamepad stick -> linear rail velocity scaling (m/s). Derived from the single
+    # --rail-max-vel knob so full stick deflection == the rail's hard speed cap; this
+    # keeps the gamepad command, the motor cap, and (via the RPC-exposed max_vel_mps)
+    # the recorded action all driven by one value instead of three.
+    lift_max_vel_ms = args.rail_max_vel
 
     # Use LinearRailVehicle instead of Vehicle
     # Use --no-linear-rail flag if you only have base (8 motors) without linear rail

@@ -409,6 +409,11 @@ class LinearRailController:
             "position_linear": linear_pos,
             "velocity_linear": linear_vel,
             "meters_per_rad": meters_per_rad,
+            # Single source of truth for the rail's linear speed cap (m/s). Exposed
+            # here so remote clients (e.g. the lerobot bi_yam_linear_bot) can inherit
+            # the controller's cap instead of configuring it independently. ``None``
+            # means no m/s cap is enforced (only the rad/s ceiling applies).
+            "max_vel_mps": self.max_vel_mps,
             "brake_on": brake_on,
             "initialized": initialized,
             "upper_limit_triggered": upper_limit,
