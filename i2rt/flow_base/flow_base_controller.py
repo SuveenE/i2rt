@@ -820,6 +820,11 @@ if __name__ == "__main__":
             return False
         raise argparse.ArgumentTypeError(f"Expected a boolean value (true/false), got {value!r}")
 
+    # Fixed (signed) meters_per_rad used when --calibration is false, i.e. when the
+    # rail can't reach the upper limit switch (payload blocking travel). Copied from a
+    # prior "Linear rail calibrated: ... meters_per_rad=..." log line.
+    DEFAULT_RAIL_METERS_PER_RAD = 0.016440
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--channel", type=str, default="can0")
     parser.add_argument(
@@ -843,13 +848,16 @@ if __name__ == "__main__":
         "init/calibration and drive the vehicle solely from remote RPC commands (default: true).",
     )
     parser.add_argument(
-        "--rail-meters-per-rad",
-        type=float,
-        default=None,
-        help="Skip the upper-limit calibration and use this fixed (signed) meters_per_rad "
-        "value instead. Use when a payload (e.g. a pole) blocks the rail from reaching the "
-        "upper limit switch. Copy the value from a previous 'Linear rail calibrated: ... "
-        "meters_per_rad=...' log line. The rail still homes down to the lower limit to zero.",
+        "--calibration",
+        type=str2bool,
+        default=True,
+        metavar="{true,false}",
+        help="Whether to run calibration on startup. When 'true' (default), the gamepad "
+        "rest-position check runs and the linear rail performs its upper-limit "
+        f"calibration. When 'false', the gamepad check is skipped and the rail uses the "
+        f"fixed meters_per_rad value ({DEFAULT_RAIL_METERS_PER_RAD}) instead of calibrating "
+        "to the upper limit (still homes down to the lower limit to zero). Use 'false' when "
+        "a payload (e.g. a pole) blocks the rail from reaching the upper limit switch.",
     )
     parser.add_argument(
         "--rail-max-vel",
@@ -876,6 +884,10 @@ if __name__ == "__main__":
     # the recorded action all driven by one value instead of three.
     lift_max_vel_ms = args.rail_max_vel
 
+    # When calibration is disabled, skip the rail's upper-limit calibration and use the
+    # fixed meters_per_rad value instead.
+    rail_meters_per_rad = None if args.calibration else DEFAULT_RAIL_METERS_PER_RAD
+
     # Use LinearRailVehicle instead of Vehicle
     # Use --no-linear-rail flag if you only have base (8 motors) without linear rail
     vehicle = LinearRailVehicle(
@@ -886,7 +898,7 @@ if __name__ == "__main__":
         auto_home=True,
         enable_linear_rail=not args.no_linear_rail,
         gpio_host=args.gpio_host,
-        linear_rail_meters_per_rad=args.rail_meters_per_rad,
+        linear_rail_meters_per_rad=rail_meters_per_rad,
         linear_rail_max_vel_mps=args.rail_max_vel,
     )
 
@@ -1015,16 +1027,19 @@ if __name__ == "__main__":
         joy = gamepad.joy
 
         # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
-        while True:
-            gamepad._poll()
-            four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
-            if all(np.abs(axis) < DEADZONE for axis in four_axis):
-                logger.info("Joystick is at rest, please check joystick")
-                break
-            else:
-                logger.warning(f"four_axis: {four_axis}")
-                logger.warning("Joystick's rest position is not at the center, please check joystick")
-                time.sleep(CALIBRATION_RETRY_DELAY)
+        if not args.calibration:
+            logger.info("Skipping gamepad rest-position calibration check (--calibration false)")
+        else:
+            while True:
+                gamepad._poll()
+                four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
+                if all(np.abs(axis) < DEADZONE for axis in four_axis):
+                    logger.info("Joystick is at rest, please check joystick")
+                    break
+                else:
+                    logger.warning(f"four_axis: {four_axis}")
+                    logger.warning("Joystick's rest position is not at the center, please check joystick")
+                    time.sleep(CALIBRATION_RETRY_DELAY)
 
     server.start(block=False)
 
