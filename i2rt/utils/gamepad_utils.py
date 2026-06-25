@@ -1,12 +1,38 @@
 #!/usr/bin/env python3
 import ctypes
 import glob
+import math
 import os
 import sys
 import time
 
 import numpy as np
 import pygame
+
+
+def apply_axis_dominance(x: float, y: float, cone_ratio: float) -> tuple[float, float]:
+    """Snap a 2D stick reading onto a cardinal axis when one axis dominates.
+
+    Two perpendicular axes of the same stick are prone to cross-talk: when the
+    user intends a pure left/right (or up/down) push but tilts the stick a few
+    degrees off-axis, the minor component can still clear a per-axis deadzone and
+    trigger an unwanted perpendicular motion.
+
+    If the minor component is smaller than ``cone_ratio`` times the major one
+    (i.e. the input falls within a cone around the dominant cardinal axis), the
+    minor component is zeroed. Deliberate diagonals outside that cone are left
+    untouched. ``cone_ratio`` is ``tan(half_angle)``; e.g. ~0.466 for a 25 deg
+    cone. A non-positive ratio disables the filter.
+    """
+    if cone_ratio <= 0.0:
+        return x, y
+    ax, ay = abs(x), abs(y)
+    if ax >= ay:
+        if ay < cone_ratio * ax:
+            y = 0.0
+    elif ax < cone_ratio * ay:
+        x = 0.0
+    return x, y
 
 
 def _pygame_sdl2_paths():
@@ -57,7 +83,12 @@ def _load_sdl2():
 
 
 class Gamepad:
-    def __init__(self, connect_timeout: float | None = None, retry_delay: float = 0.5):
+    def __init__(
+        self,
+        connect_timeout: float | None = None,
+        retry_delay: float = 0.5,
+        cross_axis_cone_deg: float = 25.0,
+    ):
         """Initialize the gamepad, polling at startup until one is connected.
 
         Args:
@@ -66,7 +97,13 @@ class Gamepad:
                 forever, so the controller comes up the moment the gamepad is
                 plugged in instead of exiting and requiring a manual restart.
             retry_delay: Delay between connection scans during the initial wait.
+            cross_axis_cone_deg: Half-angle (degrees) of the cone around each
+                cardinal direction within which the perpendicular axis of the
+                left stick is suppressed. This stops a slightly-angled "right"
+                push from also triggering a "forward" motion. Set to 0 to
+                disable.
         """
+        self._cross_axis_cone_ratio = math.tan(math.radians(cross_axis_cone_deg))
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
         # By default SDL installs SIGINT/SIGTERM handlers that swallow Ctrl+C
@@ -143,6 +180,11 @@ class Gamepad:
         x = self.joy.get_axis(1)  # Left stick Y-axis
         y = self.joy.get_axis(0)  # Left stick X-axis
         th = self.joy.get_axis(2)  # Right stick X-axis
+
+        # Suppress off-axis cross-talk on the left stick so a near-cardinal
+        # push (e.g. "right") doesn't bleed into the perpendicular axis
+        # (e.g. "forward"). Done before the per-axis deadzone below.
+        x, y = apply_axis_dominance(x, y, self._cross_axis_cone_ratio)
 
         user_cmd = np.array([-x, y, th])
         user_cmd[np.abs(user_cmd) < 0.05] = 0

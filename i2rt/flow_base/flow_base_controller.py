@@ -876,7 +876,7 @@ if __name__ == "__main__":
 
     # Base velocity limits, aligned with FlowBaseClient DEFAULT_MAX_VEL_{X,Y,THETA}.
     max_vel = np.array([0.5, 0.5, np.pi / 2])
-    max_accel = np.array([0.8, 0.8, 3.0])
+    max_accel = np.array([0.25, 0.25, 0.79])
     lift_max_vel = 7.0  # Linear rail homing speed (motor rad/s); not a clip on user commands
     # Gamepad stick -> linear rail velocity scaling (m/s). Derived from the single
     # --rail-max-vel knob so full stick deflection == the rail's hard speed cap; this

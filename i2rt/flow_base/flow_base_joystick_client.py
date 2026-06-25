@@ -78,6 +78,17 @@ def main() -> None:
         default=DEFAULT_SEND_HZ,
         help="Command send rate in Hz (must stay above ~5 Hz to beat the controller timeout).",
     )
+    parser.add_argument(
+        "--cross-axis-cone-deg",
+        type=float,
+        default=25.0,
+        help=(
+            "Half-angle (deg) of the cone around each cardinal direction within "
+            "which the left stick's perpendicular axis is suppressed, so a "
+            "slightly-angled push doesn't trigger an unwanted perpendicular "
+            "motion. Set to 0 to disable."
+        ),
+    )
     args = parser.parse_args()
 
     # Connect to the controller's RPC server first, so a bad host fails fast
@@ -87,7 +98,7 @@ def main() -> None:
 
     # Gamepad() waits (forever, by default) until a joystick is detected and
     # prints its name / axis / button counts.
-    gamepad = Gamepad()
+    gamepad = Gamepad(cross_axis_cone_deg=args.cross_axis_cone_deg)
     joy = gamepad.joy
 
     num_dofs = 3 if args.no_linear_rail else 4
