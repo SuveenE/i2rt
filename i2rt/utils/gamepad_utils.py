@@ -35,6 +35,31 @@ def apply_axis_dominance(x: float, y: float, cone_ratio: float) -> tuple[float, 
     return x, y
 
 
+def gate_to_cardinal(x: float, y: float, cone_ratio: float) -> tuple[float, float]:
+    """Keep each axis only when the push is near its OWN cardinal direction.
+
+    Unlike :func:`apply_axis_dominance` (which zeros the smaller axis when the
+    larger one dominates, so deliberate diagonals survive), this zeros an axis
+    whenever the push strays outside a tight cone around that axis's cardinal
+    direction. An axis ``x`` (horizontal) is kept only when the push is within
+    the cone of horizontal, i.e. ``|y| <= cone_ratio * |x|``; likewise ``y``
+    (vertical) is kept only when ``|x| <= cone_ratio * |y|``. Pushes in the
+    diagonal band between the two cones move NEITHER axis.
+
+    This is used for the right stick, where rotation (X) and the rail (Y) must
+    not cross-talk: a push only rotates if it is nearly horizontal and only
+    drives the rail if it is nearly vertical. ``cone_ratio`` is
+    ``tan(half_angle)``; e.g. ~0.176 for a 10 deg cone. A non-positive ratio
+    disables the filter.
+    """
+    if cone_ratio <= 0.0:
+        return x, y
+    ax, ay = abs(x), abs(y)
+    x_out = x if ay <= cone_ratio * ax else 0.0
+    y_out = y if ax <= cone_ratio * ay else 0.0
+    return x_out, y_out
+
+
 def _pygame_sdl2_paths():
     """Yield candidate paths to the *exact* SDL2 library that pygame loaded.
 
@@ -88,6 +113,7 @@ class Gamepad:
         connect_timeout: float | None = None,
         retry_delay: float = 0.5,
         cross_axis_cone_deg: float = 25.0,
+        right_stick_cone_deg: float = 10.0,
     ):
         """Initialize the gamepad, polling at startup until one is connected.
 
@@ -102,8 +128,15 @@ class Gamepad:
                 left stick is suppressed. This stops a slightly-angled "right"
                 push from also triggering a "forward" motion. Set to 0 to
                 disable.
+            right_stick_cone_deg: Half-angle (degrees) of the cone around each
+                cardinal direction within which a RIGHT-stick axis is allowed.
+                The rail (vertical) only moves when the push is within this
+                angle of top/bottom center, and rotation (horizontal) only when
+                within this angle of left/right. Diagonal pushes between the two
+                cones move neither. Set to 0 to disable.
         """
         self._cross_axis_cone_ratio = math.tan(math.radians(cross_axis_cone_deg))
+        self._right_stick_cone_ratio = math.tan(math.radians(right_stick_cone_deg))
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
         # By default SDL installs SIGINT/SIGTERM handlers that swallow Ctrl+C
@@ -175,16 +208,40 @@ class Gamepad:
             key_left_1=key_left_1,
         )
 
+    def get_right_stick(self) -> tuple[float, float]:
+        """Return the right stick as ``(rotation, rail)`` gated to its cardinals.
+
+        The right stick drives rotation on its X axis and the linear rail on its
+        Y axis. These two perpendicular axes cross-talk: a push intended as pure
+        rotation can tilt enough to also lift/lower the rail (and vice-versa).
+        Each axis is therefore kept only when the push is within
+        ``right_stick_cone_deg`` of that axis's cardinal direction: the rail
+        moves only on a near-vertical (top-center) push and rotation only on a
+        near-horizontal push; diagonal pushes between move neither. Set
+        ``right_stick_cone_deg=0`` at construction to disable.
+
+        ``rail`` is the raw axis reading (up = negative, matching SDL); callers
+        apply their own rail deadzone and scaling.
+        """
+        self._poll()
+        rotation = self.joy.get_axis(2)  # Right stick X-axis -> rotation
+        rail = self.joy.get_axis(3) if self.joy.get_numaxes() > 3 else 0.0  # Right stick Y-axis -> rail
+        rotation, rail = gate_to_cardinal(rotation, rail, self._right_stick_cone_ratio)
+        return rotation, rail
+
     def get_user_cmd(self) -> np.ndarray:
         self._poll()
         x = self.joy.get_axis(1)  # Left stick Y-axis
         y = self.joy.get_axis(0)  # Left stick X-axis
-        th = self.joy.get_axis(2)  # Right stick X-axis
 
         # Suppress off-axis cross-talk on the left stick so a near-cardinal
         # push (e.g. "right") doesn't bleed into the perpendicular axis
         # (e.g. "forward"). Done before the per-axis deadzone below.
         x, y = apply_axis_dominance(x, y, self._cross_axis_cone_ratio)
+
+        # Right stick X-axis (rotation), gated to a near-horizontal push so a
+        # near-vertical (rail) push doesn't bleed into rotation.
+        th, _ = self.get_right_stick()
 
         user_cmd = np.array([-x, y, th])
         user_cmd[np.abs(user_cmd) < 0.05] = 0

@@ -1081,7 +1081,9 @@ if __name__ == "__main__":
 
                 lift_vel = 0.0
                 if joy.get_numaxes() > 3:
-                    right_stick_y = joy.get_axis(3)  # Right stick Y-axis
+                    # Cross-axis dominance: the rail only responds to a near-
+                    # vertical push, so an intended rotation doesn't lift it.
+                    _, right_stick_y = gamepad.get_right_stick()  # Right stick Y-axis
                     # Apply larger deadzone for linear rail to prevent unwanted movement
                     # Invert: up (negative axis value) = positive velocity
                     if np.abs(right_stick_y) > RAIL_DEADZONE:

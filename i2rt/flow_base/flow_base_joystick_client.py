@@ -89,6 +89,18 @@ def main() -> None:
             "motion. Set to 0 to disable."
         ),
     )
+    parser.add_argument(
+        "--right-stick-cone-deg",
+        type=float,
+        default=10.0,
+        help=(
+            "Half-angle (deg) of the cone around each cardinal direction within "
+            "which a right-stick axis is allowed. The rail only moves on a push "
+            "within this angle of top-center, and rotation only within this "
+            "angle of horizontal; diagonal pushes move neither. Set to 0 to "
+            "disable."
+        ),
+    )
     args = parser.parse_args()
 
     # Connect to the controller's RPC server first, so a bad host fails fast
@@ -98,7 +110,10 @@ def main() -> None:
 
     # Gamepad() waits (forever, by default) until a joystick is detected and
     # prints its name / axis / button counts.
-    gamepad = Gamepad(cross_axis_cone_deg=args.cross_axis_cone_deg)
+    gamepad = Gamepad(
+        cross_axis_cone_deg=args.cross_axis_cone_deg,
+        right_stick_cone_deg=args.right_stick_cone_deg,
+    )
     joy = gamepad.joy
 
     num_dofs = 3 if args.no_linear_rail else 4
@@ -132,7 +147,9 @@ def main() -> None:
             else:
                 rail_mps = 0.0
                 if joy.get_numaxes() > 3:
-                    right_stick_y = joy.get_axis(3)
+                    # Cross-axis dominance: the rail only responds to a near-
+                    # vertical push, so an intended rotation doesn't lift it.
+                    _, right_stick_y = gamepad.get_right_stick()
                     # Up (negative axis value) -> positive (upward) rail velocity.
                     if np.abs(right_stick_y) > RAIL_DEADZONE:
                         rail_mps = -right_stick_y * args.lift_max_vel_ms
