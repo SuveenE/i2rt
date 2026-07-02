@@ -868,6 +868,24 @@ if __name__ == "__main__":
         "both the joystick and remote command paths. Homing moves bypass this cap "
         "(default: 0.5).",
     )
+    parser.add_argument(
+        "--max-vel",
+        type=float,
+        nargs=3,
+        default=[0.5, 0.5, np.pi / 2],
+        metavar=("X", "Y", "THETA"),
+        help="Base max velocity as three values: x (m/s), y (m/s), theta (rad/s). "
+        "Default: 0.5 0.5 1.5708.",
+    )
+    parser.add_argument(
+        "--max-accel",
+        type=float,
+        nargs=3,
+        default=[0.25, 0.25, 0.79],
+        metavar=("X", "Y", "THETA"),
+        help="Base max acceleration as three values: x (m/s^2), y (m/s^2), theta (rad/s^2). "
+        "Default: 0.25 0.25 0.79.",
+    )
 
     CALIBRATION_RETRY_DELAY = 1
     DEADZONE = 0.05  # Deadzone for base control (x, y, theta)
@@ -875,8 +893,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Base velocity limits, aligned with FlowBaseClient DEFAULT_MAX_VEL_{X,Y,THETA}.
-    max_vel = np.array([0.5, 0.5, np.pi / 2])
-    max_accel = np.array([0.25, 0.25, 0.79])
+    # Overridable via --max-vel / --max-accel (defaults match the historical values).
+    max_vel = np.array(args.max_vel)
+    max_accel = np.array(args.max_accel)
     lift_max_vel = 7.0  # Linear rail homing speed (motor rad/s); not a clip on user commands
     # Gamepad stick -> linear rail velocity scaling (m/s). Derived from the single
     # --rail-max-vel knob so full stick deflection == the rail's hard speed cap; this
