@@ -862,29 +862,29 @@ if __name__ == "__main__":
     parser.add_argument(
         "--rail-max-vel",
         type=float,
-        default=0.5,
+        default=0.1,
         help="Hard cap on the linear rail's speed, in m/s (positive). Wired through to "
         "LinearRailController.max_vel_mps and enforced once the rail is calibrated, on "
         "both the joystick and remote command paths. Homing moves bypass this cap "
-        "(default: 0.5).",
+        "(default: 0.1).",
     )
     parser.add_argument(
         "--max-vel",
         type=float,
         nargs=3,
-        default=[0.5, 0.5, np.pi / 2],
+        default=[0.25, 0.25, 0.78],
         metavar=("X", "Y", "THETA"),
         help="Base max velocity as three values: x (m/s), y (m/s), theta (rad/s). "
-        "Default: 0.5 0.5 1.5708.",
+        "Default: 0.25 0.25 0.78.",
     )
     parser.add_argument(
         "--max-accel",
         type=float,
         nargs=3,
-        default=[0.25, 0.25, 0.79],
+        default=[0.15, 0.15, 0.5],
         metavar=("X", "Y", "THETA"),
         help="Base max acceleration as three values: x (m/s^2), y (m/s^2), theta (rad/s^2). "
-        "Default: 0.25 0.25 0.79.",
+        "Default: 0.15 0.15 0.5.",
     )
 
     CALIBRATION_RETRY_DELAY = 1
