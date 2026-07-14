@@ -29,6 +29,7 @@ from i2rt.flow_base.gpio_backend import (
     LocalGPIOBackend,
     NoopGPIOBackend,
     RemoteGPIOBackend,
+    SerialGpioBackend,
 )
 from i2rt.flow_base.linear_rail_controller import (
     LinearRailController,
@@ -576,6 +577,7 @@ class LinearRailVehicle(Vehicle):
         homing_timeout: float = 30.0,
         enable_linear_rail: bool = True,
         gpio_host: Optional[str] = None,
+        usb_gpio_device: Optional[str] = None,
         linear_rail_stroke_m: float = 1.0,
         linear_rail_max_vel_mps: float = 0.5,
         linear_rail_meters_per_rad: Optional[float] = None,
@@ -598,8 +600,13 @@ class LinearRailVehicle(Vehicle):
             enable_linear_rail: Whether to enable linear rail. If False, only base (8 motors) will be initialized.
             gpio_host: Address of the RPi GPIO satellite server (e.g. "192.168.1.50:8765").
                 If provided, brake and limit switch GPIO operations are performed
-                remotely via portal RPC.  If *None*, falls back to local RPi.GPIO
-                or a no-op backend when RPi.GPIO is unavailable.
+                remotely via portal RPC.  If *None*, GPIO is driven locally: native
+                RPi.GPIO on a Raspberry Pi, else the USB-to-GPIO converter on x86.
+            usb_gpio_device: Serial device path for the USB-to-GPIO converter on an
+                x86 / non-Pi host (e.g. "/dev/ttyUSB0"). Only used when the linear rail
+                is enabled, no gpio_host is set, and this host is not a Raspberry Pi. If
+                *None*, the SerialGpioBackend keeps its default (/dev/ttyUSB0 or the
+                I2RT_USB_GPIO_PORT env var). Ignored on a Raspberry Pi (native GPIO).
             linear_rail_stroke_m: Physical stroke between the upper and lower limit
                 switches, in meters. Used to calibrate meters_per_rad during homing.
             linear_rail_max_vel_mps: Hard cap on the rail's linear speed, in m/s, enforced
@@ -647,7 +654,7 @@ class LinearRailVehicle(Vehicle):
         )
 
         # Select GPIO backend
-        gpio_backend = self._create_gpio_backend(gpio_host, enable_linear_rail)
+        gpio_backend = self._create_gpio_backend(gpio_host, enable_linear_rail, usb_gpio_device)
         if enable_linear_rail:
             gpio_backend.initialize_brake()
 
@@ -693,13 +700,19 @@ class LinearRailVehicle(Vehicle):
                 )
 
     @staticmethod
-    def _create_gpio_backend(gpio_host: Optional[str], enable_linear_rail: bool):
+    def _create_gpio_backend(gpio_host: Optional[str], enable_linear_rail: bool, usb_gpio_device: Optional[str] = None):
         """Select the appropriate GPIOBackend based on configuration.
 
-        Raises RuntimeError when linear rail is enabled but no GPIO source
-        (local RPi.GPIO or remote satellite) is available — running without
-        brake and limit-switch control is unsafe.
+        Selection order (when the linear rail is enabled):
+          1. ``--gpio-host`` set -> RemoteGPIOBackend (Pi GPIO satellite over RPC).
+          2. Running on a Raspberry Pi -> LocalGPIOBackend (native RPi.GPIO).
+          3. Otherwise (x86 / non-Pi) -> SerialGpioBackend (USB-to-GPIO converter).
+
+        Raises RuntimeError when the linear rail is enabled but no GPIO source is
+        available — running without brake and limit-switch control is unsafe.
         """
+        from i2rt.utils.usb_gpio_driver import is_raspberry_pi
+
         if not enable_linear_rail:
             return NoopGPIOBackend()
 
@@ -707,17 +720,34 @@ class LinearRailVehicle(Vehicle):
             logger.info(f"Using remote GPIO backend at {gpio_host}")
             return RemoteGPIOBackend(gpio_host)
 
+        if is_raspberry_pi():
+            try:
+                backend = LocalGPIOBackend()
+                logger.info("Using local RPi.GPIO backend")
+                return backend
+            except (ImportError, RuntimeError) as e:
+                raise RuntimeError(
+                    "Linear rail is enabled and this host looks like a Raspberry Pi, "
+                    f"but RPi.GPIO could not be initialized: {e}\n"
+                    "Either:\n"
+                    "  1. Install/fix RPi.GPIO on the Pi, or\n"
+                    "  2. Start the GPIO satellite on the RPi and pass "
+                    "--gpio-host <RPI_IP>:8765, or\n"
+                    "  3. Disable the linear rail with --no-linear-rail"
+                )
+
         try:
-            backend = LocalGPIOBackend()
-            logger.info("Using local RPi.GPIO backend")
+            backend = SerialGpioBackend(usb_gpio_device)
+            logger.info("Using USB-to-GPIO serial backend (x86 / non-Pi host)")
             return backend
-        except (ImportError, RuntimeError):
+        except (ImportError, RuntimeError) as e:
             raise RuntimeError(
                 "Linear rail is enabled but no GPIO backend is available. "
-                "RPi.GPIO is not installed (not running on a Raspberry Pi) "
-                "and no --gpio-host was provided.\n"
+                "This host is not a Raspberry Pi and the USB-to-GPIO converter "
+                f"could not be initialized: {e}\n"
                 "Either:\n"
-                "  1. Run on a Raspberry Pi where RPi.GPIO is available, or\n"
+                "  1. Connect the USB-to-GPIO converter and pass --device <serial-port> "
+                "(e.g. /dev/ttyUSB0), or\n"
                 "  2. Start the GPIO satellite on the RPi and pass "
                 "--gpio-host <RPI_IP>:8765, or\n"
                 "  3. Disable the linear rail with --no-linear-rail"
@@ -837,7 +867,16 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Address of the RPi GPIO satellite server (e.g. 192.168.1.50:8765). "
-        "If not set, falls back to local RPi.GPIO or no-op.",
+        "If not set, GPIO is driven locally (native RPi.GPIO on a Pi, else the "
+        "USB-to-GPIO converter via --device).",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Serial device for the USB-to-GPIO converter (e.g. /dev/ttyUSB0). Required "
+        "with the linear rail on an x86 / non-Pi host when --gpio-host is not set. "
+        "Ignored on a Raspberry Pi (native GPIO). The I2RT_USB_GPIO_PORT env var also works.",
     )
     parser.add_argument(
         "--gamepad",
@@ -892,6 +931,25 @@ if __name__ == "__main__":
     RAIL_DEADZONE = 0.15  # Larger deadzone for linear rail to prevent unwanted movement
     args = parser.parse_args()
 
+    # The linear rail needs a GPIO source for its brake + limit switches. On an
+    # x86 / non-Pi host that means either the USB-to-GPIO converter (--device /
+    # I2RT_USB_GPIO_PORT) or the RPi GPIO satellite (--gpio-host). Fail fast with a
+    # clear message instead of a later backend init error.
+    from i2rt.utils.usb_gpio_driver import ENV_PORT_VAR, is_raspberry_pi
+
+    if (
+        not args.no_linear_rail
+        and args.gpio_host is None
+        and args.device is None
+        and not is_raspberry_pi()
+        and ENV_PORT_VAR not in os.environ
+    ):
+        sys.exit(
+            "--device is required for the linear rail on an x86 / non-Pi host "
+            "(e.g. --device /dev/ttyUSB0). Alternatively set I2RT_USB_GPIO_PORT, "
+            "use --gpio-host <RPI_IP>:8765, or disable the rail with --no-linear-rail."
+        )
+
     # Base velocity limits, aligned with FlowBaseClient DEFAULT_MAX_VEL_{X,Y,THETA}.
     # Overridable via --max-vel / --max-accel (defaults match the historical values).
     max_vel = np.array(args.max_vel)
@@ -917,6 +975,7 @@ if __name__ == "__main__":
         auto_home=True,
         enable_linear_rail=not args.no_linear_rail,
         gpio_host=args.gpio_host,
+        usb_gpio_device=args.device,
         linear_rail_meters_per_rad=rail_meters_per_rad,
         linear_rail_max_vel_mps=args.rail_max_vel,
     )

@@ -163,6 +163,35 @@ To control the base without the built-in Raspberry Pi:
 3. Clone the i2rt repository on your external computer
 4. Control the base directly through your external system
 
+### Linear Rail on x86 / non-Pi hosts (USB-GPIO converter)
+
+On the built-in Raspberry Pi the linear rail's brake and limit switches use the Pi's native GPIO (`RPi.GPIO`) — no extra setup. On an x86 / non-Pi host they are driven through a **bestep USB-to-16-channel GPIO converter** (hardware id `ZT-DPI/SY`) on a serial port. The backend is auto-selected from `platform.machine()`, so the control code is identical on both platforms.
+
+- `--device` is required when the linear rail is enabled on an x86 / non-Pi host (and `--gpio-host` is not set); on the Raspberry Pi it is not needed (native GPIO) and is ignored, e.g.
+
+  ```bash
+  python i2rt/flow_base/flow_base_controller.py --device /dev/ttyUSB0
+  ```
+
+  (The `I2RT_USB_GPIO_PORT` env var also works for programmatic use; the flag wins.)
+- Converter channel wiring: **channel 1 = upper limit switch, channel 2 = lower limit switch, channel 3 = brake**.
+- Requires `pyserial` (installed with the package).
+
+Alternatively, keep GPIO on the Pi and drive it remotely: start the GPIO satellite on the Pi (`python i2rt/flow_base/gpio_satellite_server.py --port 8765`) and pass `--gpio-host <RPI_IP>:8765` on the control host.
+
+Wiring (the `BCM N` are the controller's logical pins, mapped to converter channels by `USB_GPIO_CHANNEL_MAP`):
+
+```text
+x86 host --[USB 115200 8N1]--> bestep USB-to-16ch GPIO converter (ZT-DPI/SY),
+                               enumerates as /dev/ttyUSB0
+                               |
+                               +-- 3.3V --> upper/lower limit switches (common)
+                               +-- ch1  --> upper limit switch   (BCM 5)
+                               +-- ch2  --> lower limit switch   (BCM 6)
+                               +-- ch3  --> brake control signal (BCM 12)
+                               +-- GND  --> brake driver GND
+```
+
 ## Troubleshooting
 
 - **Remote unresponsive**: Toggle remote off and on to wake from sleep

@@ -17,6 +17,8 @@ dependencies = [
     "numpy==2.2.6",
     "portal==3.7.3",
     "pygame==2.6.1",
+    # USB-to-GPIO converter for the linear-rail brake + limit switches on x86 / non-Pi hosts.
+    "pyserial>=3.5",
     "python-can==4.5.0",
     "pydantic==2.12.5",
     "pydantic-core==2.41.5",

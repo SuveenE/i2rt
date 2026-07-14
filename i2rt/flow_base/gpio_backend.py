@@ -18,6 +18,16 @@ LOWER_LIMIT_GPIO = 6
 
 DEFAULT_GPIO_SATELLITE_PORT = 8765
 
+# Mapping from the controller's logical BCM pins to the USB-to-GPIO converter's
+# 1-based channels (see i2rt/utils/usb_gpio_driver.py). Only used on x86 / non-Pi
+# hosts where the SerialGpioBackend drives the converter; the native RPi.GPIO
+# backend addresses the BCM pins directly and ignores this map.
+USB_GPIO_CHANNEL_MAP = {
+    UPPER_LIMIT_GPIO: 1,  # GPIO5  -> converter channel 1 (upper limit)
+    LOWER_LIMIT_GPIO: 2,  # GPIO6  -> converter channel 2 (lower limit)
+    BRAKE_CONTROL_GPIO: 3,  # GPIO12 -> converter channel 3 (brake)
+}
+
 
 class GPIOBackend(abc.ABC):
     """Abstract interface for GPIO operations (brake + limit switches)."""
@@ -56,12 +66,21 @@ class GPIOBackend(abc.ABC):
 
 
 class LocalGPIOBackend(GPIOBackend):
-    """Backend that talks directly to RPi.GPIO on the local machine."""
+    """Backend that talks directly to a local RPi.GPIO-compatible module.
 
-    def __init__(self):
-        from RPi import GPIO  # noqa: N811
+    By default this imports the Raspberry Pi's native ``RPi.GPIO`` module. A
+    drop-in replacement can be injected via ``gpio_module`` (e.g. the USB-to-GPIO
+    converter shim in :mod:`i2rt.utils.usb_gpio_driver`), which lets the same
+    limit-switch / brake logic run unchanged on an x86 / non-Pi host.
+    """
 
-        self._GPIO = GPIO
+    def __init__(self, gpio_module: Optional[object] = None):
+        if gpio_module is None:
+            from RPi import GPIO  # noqa: N811
+
+            gpio_module = GPIO
+
+        self._GPIO = gpio_module
         self._gpio_mode_set = False
         self._on_limit_change: Optional[Callable] = None
         self._upper = False
@@ -166,6 +185,32 @@ class LocalGPIOBackend(GPIOBackend):
             logger.info("Local GPIO cleaned up")
         except Exception as e:
             logger.warning(f"GPIO cleanup error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Serial backend — USB-to-GPIO converter on an x86 / non-Pi host
+# ---------------------------------------------------------------------------
+
+
+class SerialGpioBackend(LocalGPIOBackend):
+    """Backend for x86 / non-Pi hosts driving the linear rail via a USB-to-GPIO converter.
+
+    Reuses all of :class:`LocalGPIOBackend`'s brake / limit-switch logic, but
+    injects the ``RPi.GPIO``-compatible shim from
+    :mod:`i2rt.utils.usb_gpio_driver` instead of the Pi's native ``RPi.GPIO``
+    module. The shim translates the controller's BCM pins to converter channels
+    via :data:`USB_GPIO_CHANNEL_MAP`.
+    """
+
+    def __init__(self, device: Optional[str] = None):
+        from i2rt.utils.usb_gpio_driver import get_gpio_backend
+
+        # get_gpio_backend() honors an explicit device, else the I2RT_USB_GPIO_PORT
+        # env var, else /dev/ttyUSB0. On a Pi it would return native RPi.GPIO, but
+        # this backend is only selected on non-Pi hosts (see flow_base_controller).
+        shim = get_gpio_backend(port=device, pin_map=USB_GPIO_CHANNEL_MAP)
+        super().__init__(gpio_module=shim)
+        logger.info(f"SerialGpioBackend using USB-to-GPIO converter (device={device or 'default'})")
 
 
 # ---------------------------------------------------------------------------
