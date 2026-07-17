@@ -116,6 +116,9 @@ class LocalGPIOBackend(GPIOBackend):
 
     def set_brake(self, engaged: bool) -> None:
         try:
+            # RPi.GPIO.cleanup() clears the numbering mode, so restore it when
+            # this long-lived backend receives another command after CLEANUP.
+            self._ensure_gpio_mode()
             self._GPIO.output(
                 BRAKE_CONTROL_GPIO,
                 self._GPIO.LOW if engaged else self._GPIO.HIGH,
@@ -185,6 +188,9 @@ class LocalGPIOBackend(GPIOBackend):
             logger.info("Local GPIO cleaned up")
         except Exception as e:
             logger.warning(f"GPIO cleanup error: {e}")
+        finally:
+            # GPIO.cleanup() clears the numbering mode.
+            self._gpio_mode_set = False
 
 
 # ---------------------------------------------------------------------------
