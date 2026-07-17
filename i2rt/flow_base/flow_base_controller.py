@@ -819,6 +819,94 @@ class LinearRailVehicle(Vehicle):
         except Exception as e:
             logger.error(f"Failed to set linear rail velocity: {e}", exc_info=True)
 
+    def move_linear_rail_to_height(
+        self,
+        target_height_m: float,
+        kp: float = 1.0,
+        max_accel_mps2: float = 0.15,
+        tolerance_m: float = 0.005,
+        timeout_s: float = 30.0,
+    ) -> None:
+        """Smoothly seek an absolute rail height measured from the lower limit.
+
+        Uses the same closed-loop strategy as ``move_to_initial_height`` in the
+        LeRobot recording path: a speed-capped P-controller with acceleration
+        limiting, limit-switch checks, and a wall-clock timeout.
+        """
+        if self.linear_rail is None:
+            raise RuntimeError("Cannot move to an initial height without a linear rail")
+        if not 0.0 <= target_height_m <= self.linear_rail.total_stroke_m:
+            raise ValueError(
+                f"Initial height must be between 0 and {self.linear_rail.total_stroke_m:.3f} m, "
+                f"got {target_height_m:.3f} m"
+            )
+
+        meters_per_rad = self.linear_rail.meters_per_rad
+        if meters_per_rad is None:
+            raise RuntimeError("Cannot move to an initial height before the linear rail is calibrated")
+
+        homing_speed_mps = abs(self.linear_rail.rail_speed * self.linear_rail.homing_speed_ratio * meters_per_rad)
+        max_speed_mps = homing_speed_mps
+        if self.linear_rail.max_vel_mps is not None:
+            max_speed_mps = min(max_speed_mps, self.linear_rail.max_vel_mps)
+
+        logger.info(
+            f"Moving linear rail to initial height {target_height_m:.4f} m "
+            f"(speed cap {max_speed_mps:.4f} m/s, accel {max_accel_mps2:.4f} m/s^2)"
+        )
+
+        start_t = time.perf_counter()
+        last_t = start_t
+        commanded_velocity = 0.0
+        try:
+            while True:
+                now = time.perf_counter()
+                state = self.linear_rail.get_state()
+                position_m = state["position_linear"]
+                if position_m is None:
+                    raise RuntimeError("Linear rail lost its position calibration during the height move")
+
+                error = target_height_m - position_m
+                if abs(error) < tolerance_m:
+                    logger.info(f"Linear rail reached initial height at {position_m:.4f} m")
+                    break
+                if state["upper_limit_triggered"] and error > 0:
+                    logger.warning("Rail hit upper limit during initial-height move; stopping")
+                    break
+                if state["lower_limit_triggered"] and error < 0:
+                    logger.warning("Rail hit lower limit during initial-height move; stopping")
+                    break
+                if now - start_t > timeout_s:
+                    logger.warning(
+                        f"Initial-height move timed out after {timeout_s:.0f}s at {position_m:.4f} m "
+                        f"(target {target_height_m:.4f} m)"
+                    )
+                    break
+
+                target_velocity = float(np.clip(kp * error, -max_speed_mps, max_speed_mps))
+                dt = now - last_t
+                max_delta_velocity = max_accel_mps2 * dt
+                commanded_velocity += float(
+                    np.clip(target_velocity - commanded_velocity, -max_delta_velocity, max_delta_velocity)
+                )
+                self.set_linear_rail_velocity(commanded_velocity)
+                last_t = now
+                time.sleep(0.01)
+        finally:
+            # Ramp down while continuing to refresh the command, then guarantee a stop.
+            ramp_start = time.perf_counter()
+            last_t = ramp_start
+            while abs(commanded_velocity) > 1e-4 and time.perf_counter() - ramp_start < 2.0:
+                now = time.perf_counter()
+                max_delta_velocity = max_accel_mps2 * (now - last_t)
+                commanded_velocity += float(
+                    np.clip(-commanded_velocity, -max_delta_velocity, max_delta_velocity)
+                )
+                self.set_linear_rail_velocity(commanded_velocity)
+                last_t = now
+                time.sleep(0.01)
+            self.set_linear_rail_velocity(0.0)
+
     def close(self) -> None:
         """Clean up resources: stop linear rail and engage brake."""
         if hasattr(self, "linear_rail"):
@@ -908,6 +996,16 @@ if __name__ == "__main__":
         "(default: 0.1).",
     )
     parser.add_argument(
+        "--initial-height",
+        type=float,
+        default=None,
+        metavar="METERS",
+        help="Optional absolute linear-rail height in meters above the lower limit. "
+        "After startup calibration/homing, smoothly seek this height before accepting "
+        "gamepad or remote commands. Must be within the calibrated rail stroke. "
+        "By default the rail remains at the lower-limit home position.",
+    )
+    parser.add_argument(
         "--max-vel",
         type=float,
         nargs=3,
@@ -930,6 +1028,11 @@ if __name__ == "__main__":
     DEADZONE = 0.05  # Deadzone for base control (x, y, theta)
     RAIL_DEADZONE = 0.15  # Larger deadzone for linear rail to prevent unwanted movement
     args = parser.parse_args()
+    if args.initial_height is not None:
+        if args.no_linear_rail:
+            parser.error("--initial-height cannot be used with --no-linear-rail")
+        if not 0.0 <= args.initial_height <= 1.0:
+            parser.error("--initial-height must be between 0.0 and 1.0 meters")
 
     # The linear rail needs a GPIO source for its brake + limit switches. On an
     # x86 / non-Pi host that means either the USB-to-GPIO converter (--device /
@@ -988,6 +1091,9 @@ if __name__ == "__main__":
             logger.error(f"Error during atexit close: {e}")
 
     atexit.register(close_vehicle)
+
+    if args.initial_height is not None:
+        vehicle.move_linear_rail_to_height(args.initial_height)
 
     class TimeoutRemoteCommand:
         """Unified remote command handler for LinearRailVehicle (base + linear rail)"""
