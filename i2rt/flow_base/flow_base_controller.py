@@ -1004,11 +1004,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--calibration",
         type=str2bool,
-        default=True,
+        default=False,
         metavar="{true,false}",
-        help="Whether to run calibration on startup. When 'true' (default), the gamepad "
+        help="Whether to run calibration on startup. When 'true', the gamepad "
         "rest-position check runs and the linear rail performs its upper-limit "
-        f"calibration. When 'false', the gamepad check is skipped and the rail uses the "
+        f"calibration. When 'false' (default), the gamepad check is skipped and the rail uses the "
         f"fixed meters_per_rad value ({DEFAULT_RAIL_METERS_PER_RAD}) instead of calibrating "
         "to the upper limit (still homes down to the lower limit to zero). Use 'false' when "
         "a payload (e.g. a pole) blocks the rail from reaching the upper limit switch.",
