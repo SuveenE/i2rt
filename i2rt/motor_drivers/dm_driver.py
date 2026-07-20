@@ -9,6 +9,7 @@ from typing import Any, Callable, List, Optional, Protocol, Tuple
 import can
 import numpy as np
 
+from i2rt.exceptions import MotorCommunicationError
 from i2rt.motor_drivers.can_interface import CanInterface
 from i2rt.motor_drivers.utils import (
     FeedbackFrameInfo,
@@ -213,7 +214,7 @@ class DMSingleMotorCanInterface(CanInterface):
         data = [0xFF] * 7 + [0xFE]
         try:
             message = self._send_message_get_response(id, motor_id, data, 2)
-        except AssertionError:
+        except MotorCommunicationError:
             pass
         # check if set zero position success
         current_state = self.set_control(id, MotorType.DM4310, 0, 0, 0, 0, 0)
