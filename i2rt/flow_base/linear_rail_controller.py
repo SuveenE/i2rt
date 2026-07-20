@@ -141,14 +141,14 @@ class LinearRailController:
                 joystick and remote command paths. ``None`` disables the m/s cap (only the
                 ``rail_speed`` rad/s limit applies). Homing moves bypass ``set_velocity`` so
                 they are never throttled by this.
-            meters_per_rad_override: If provided, skip the upper-limit phase of startup
-                calibration and use this (fixed, signed) value as ``meters_per_rad`` instead
-                of measuring it. ``meters_per_rad`` is a mechanical constant (lead-screw
-                pitch / gearing), so once measured it can be reused. Useful when a payload
-                (e.g. a pole) blocks upward travel to the upper limit switch. The rail still
-                homes DOWN to the lower limit to establish the encoder zero, so the value
-                must carry the same sign as the originally calibrated one (copy it from a
-                previous "Linear rail calibrated: ... meters_per_rad=..." log line).
+            meters_per_rad_override: If provided, skip startup limit-switch calibration
+                and use this (fixed, signed) value as ``meters_per_rad`` instead of measuring
+                it. ``meters_per_rad`` is a mechanical constant (lead-screw
+                pitch / gearing), so once measured it can be reused. No startup rail motion
+                is performed; the current position is set as the software zero instead.
+                Useful when a payload blocks travel to either limit switch. The value must
+                carry the same sign as the originally calibrated one (copy it from a previous
+                "Linear rail calibrated: ... meters_per_rad=..." log line).
         """
         self.single_motor_control_interface = single_motor_control_interface
         self.gpio_backend = gpio_backend if gpio_backend is not None else _default_gpio_backend()
@@ -226,36 +226,29 @@ class LinearRailController:
             logger.error(f"Failed to {action} brake: {e}")
 
     def _initialize_linear_rail(self) -> None:
-        """Calibrate linear rail by driving to the upper limit, then the lower limit.
+        """Initialize the rail using a fixed scale or a full limit-switch calibration.
 
-        Captures the motor angle at each limit, computes meters_per_rad assuming the
-        physical stroke between limits is ``self.total_stroke_m``, then zeroes the
-        encoder at the lower limit so encoder 0 corresponds to the bottom of travel.
+        With ``meters_per_rad_override``, performs no startup motion and makes the
+        current position zero. Otherwise, captures the motor angle at each limit,
+        computes meters_per_rad from ``self.total_stroke_m``, and zeroes the encoder
+        at the lower limit.
         """
         try:
             # Release brake before any motion
             self.set_brake(engaged=False)
 
-            # Override path: a payload (e.g. a pole) blocks upward travel, so we
-            # can't reach the upper limit to measure meters_per_rad. Since it's a
-            # fixed mechanical constant, use the supplied value and only home DOWN
-            # to the lower limit to establish the encoder zero.
+            # Override path: reuse the fixed mechanical conversion without moving
+            # toward either limit. The startup position becomes this session's zero.
             if self.meters_per_rad_override is not None:
                 with self._lock:
-                    already_at_lower = self.lower_limit_triggered
-                if not already_at_lower:
-                    self._move_until_limit(direction="down")
-                time.sleep(0.2)  # settle so the encoder reading is stable
-                with self._lock:
                     self.meters_per_rad = self.meters_per_rad_override
-                logger.info(
-                    f"Linear rail using provided meters_per_rad={self.meters_per_rad:.6f} m/rad "
-                    f"(upper-limit calibration skipped)"
-                )
-                # Zero encoder at lower limit so encoder 0 == bottom of travel
-                self._set_home_zero()
+                self._set_home_zero(at_lower_limit=False)
                 with self._lock:
                     self.initialized = True
+                logger.info(
+                    f"Linear rail using provided meters_per_rad={self.meters_per_rad:.6f} m/rad "
+                    f"(startup motion skipped; current position set to zero)"
+                )
                 return
 
             # Phase 1: drive to upper limit (skip if already triggered there)
@@ -368,10 +361,13 @@ class LinearRailController:
         self._homing_event.clear()
         self._homing_start_time = None
 
-    def _set_home_zero(self) -> None:
-        """Zero the encoder at the current lower-limit (home) position so encoder 0 == bottom of travel"""
+    def _set_home_zero(self, *, at_lower_limit: bool = True) -> None:
+        """Zero the encoder at the current rail position."""
         self.single_motor_control_interface.set_zero_position()
-        logger.info("Linear rail encoder zeroed at lower limit (encoder 0 = home)")
+        if at_lower_limit:
+            logger.info("Linear rail encoder zeroed at lower limit (encoder 0 = home)")
+        else:
+            logger.info("Linear rail encoder zeroed at startup position (no limit-switch homing)")
 
     def is_homing(self) -> bool:
         """Check if linear rail is currently homing"""

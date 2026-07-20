@@ -619,10 +619,10 @@ class LinearRailVehicle(Vehicle):
             linear_rail_max_vel_mps: Hard cap on the rail's linear speed, in m/s, enforced
                 by the controller once calibrated (applies to both joystick and remote
                 commands).
-            linear_rail_meters_per_rad: If provided, skip the upper-limit calibration phase
-                and use this fixed (signed) value as meters_per_rad. Lets the rail come up
-                when a payload (e.g. a pole) blocks travel to the upper limit switch; it
-                still homes down to the lower limit for the encoder zero.
+            linear_rail_meters_per_rad: If provided, skip startup limit-switch calibration
+                and use this fixed (signed) value as meters_per_rad. No startup rail motion
+                is performed; the current position becomes the software zero. This lets the
+                rail start when a payload blocks travel to either limit switch.
         """
         # Create base motor list (8 motors: 4 casters * 2 motors each)
         motor_list = []
@@ -845,11 +845,13 @@ class LinearRailVehicle(Vehicle):
         tolerance_m: float = 0.005,
         timeout_s: float = 30.0,
     ) -> None:
-        """Smoothly seek an absolute rail height measured from the lower limit.
+        """Smoothly seek a rail height measured from the controller's current zero.
 
         Uses the same closed-loop strategy as ``move_to_initial_height`` in the
         LeRobot recording path: a speed-capped P-controller with acceleration
-        limiting, limit-switch checks, and a wall-clock timeout.
+        limiting, limit-switch checks, and a wall-clock timeout. The zero is the
+        lower limit after full calibration, or the startup position when a fixed
+        meters-per-radian override is used.
         """
         if self.linear_rail is None:
             raise RuntimeError("Cannot move to an initial height without a linear rail")
@@ -956,9 +958,9 @@ if __name__ == "__main__":
             return False
         raise argparse.ArgumentTypeError(f"Expected a boolean value (true/false), got {value!r}")
 
-    # Fixed (signed) meters_per_rad used when --calibration is false, i.e. when the
-    # rail can't reach the upper limit switch (payload blocking travel). Copied from a
-    # prior "Linear rail calibrated: ... meters_per_rad=..." log line.
+    # Fixed (signed) meters_per_rad used when --calibration is false. This avoids all
+    # startup rail motion and treats the current position as zero. Copied from a prior
+    # "Linear rail calibrated: ... meters_per_rad=..." log line.
     DEFAULT_RAIL_METERS_PER_RAD = 0.016440
 
     parser = argparse.ArgumentParser()
@@ -1009,9 +1011,9 @@ if __name__ == "__main__":
         help="Whether to run calibration on startup. When 'true', the gamepad "
         "rest-position check runs and the linear rail performs its upper-limit "
         f"calibration. When 'false' (default), the gamepad check is skipped and the rail uses the "
-        f"fixed meters_per_rad value ({DEFAULT_RAIL_METERS_PER_RAD}) instead of calibrating "
-        "to the upper limit (still homes down to the lower limit to zero). Use 'false' when "
-        "a payload (e.g. a pole) blocks the rail from reaching the upper limit switch.",
+        f"fixed meters_per_rad value ({DEFAULT_RAIL_METERS_PER_RAD}) without moving during startup; "
+        "the current rail position becomes zero. Use 'false' when a payload blocks travel "
+        "to either limit switch.",
     )
     parser.add_argument(
         "--rail-max-vel",
@@ -1027,10 +1029,11 @@ if __name__ == "__main__":
         type=float,
         default=None,
         metavar="METERS",
-        help="Optional absolute linear-rail height in meters above the lower limit. "
-        "After startup calibration/homing, smoothly seek this height before accepting "
-        "gamepad or remote commands. Must be within the calibrated rail stroke. "
-        "By default the rail remains at the lower-limit home position.",
+        help="Optional linear-rail height in meters above the controller's zero (the lower "
+        "limit after full calibration, or the startup position with calibration disabled). "
+        "Smoothly seek this height before accepting gamepad or remote commands. "
+        "Must be within the configured rail stroke. "
+        "By default no additional height move is performed.",
     )
     parser.add_argument(
         "--max-vel",
@@ -1094,8 +1097,8 @@ if __name__ == "__main__":
     # the recorded action all driven by one value instead of three.
     lift_max_vel_ms = args.rail_max_vel
 
-    # When calibration is disabled, skip the rail's upper-limit calibration and use the
-    # fixed meters_per_rad value instead.
+    # When calibration is disabled, skip all startup rail motion, use the fixed
+    # meters_per_rad value, and make the current position zero.
     rail_meters_per_rad = None if args.calibration else DEFAULT_RAIL_METERS_PER_RAD
 
     # Use LinearRailVehicle instead of Vehicle
