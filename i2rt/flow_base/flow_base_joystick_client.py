@@ -47,6 +47,14 @@ DEFAULT_LIFT_MAX_VEL_MS = 0.5  # Right-stick Y full deflection -> m/s for the ra
 DEFAULT_SEND_HZ = 50.0  # Command rate. Stay well under the controller's 0.2 s timeout.
 
 
+def str2bool(value: str) -> bool:
+    if value.lower() in ("true", "t", "yes", "y", "1"):
+        return True
+    if value.lower() in ("false", "f", "no", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"Expected a boolean value (true/false), got {value!r}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -101,6 +109,16 @@ def main() -> None:
             "disable."
         ),
     )
+    parser.add_argument(
+        "--require-neutral-at-startup",
+        type=str2bool,
+        default=True,
+        metavar="{true,false}",
+        help=(
+            "Require all joystick velocity axes to be neutral before streaming "
+            "commands (default: true)."
+        ),
+    )
     args = parser.parse_args()
 
     # Connect to the controller's RPC server first, so a bad host fails fast
@@ -123,10 +141,37 @@ def main() -> None:
     last_mode_toggled = False
     count = 0
 
-    print("Streaming joystick -> base. Press Ctrl+C to stop (base stops on disconnect).")
+    def read_velocity_target() -> np.ndarray:
+        base_cmd = gamepad.get_user_cmd()  # normalised [x, y, theta], deadzone applied
+        if args.no_linear_rail:
+            return base_cmd
+
+        rail_mps = 0.0
+        if joy.get_numaxes() > 3:
+            # Cross-axis dominance: the rail only responds to a near-
+            # vertical push, so an intended rotation doesn't lift it.
+            _, right_stick_y = gamepad.get_right_stick()
+            # Up (negative axis value) -> positive (upward) rail velocity.
+            if np.abs(right_stick_y) > RAIL_DEADZONE:
+                rail_mps = -right_stick_y * args.lift_max_vel_ms
+        return np.append(base_cmd, rail_mps)  # 4D: rail in physical m/s
+
     try:
+        if args.require_neutral_at_startup:
+            startup_target = read_velocity_target()
+            if not np.all(startup_target == 0.0):
+                raise RuntimeError(
+                    "Joystick startup safety check failed: the first velocity reading "
+                    f"must be all zeros, got {startup_target.tolist()}. "
+                    "Center the joystick and restart the client."
+                )
+            print("Joystick startup safety check passed: all velocity axes are zero.")
+        else:
+            print("WARNING: Joystick startup zero-value safety check is disabled.")
+
+        print("Streaming joystick -> base. Press Ctrl+C to stop (base stops on disconnect).")
         while True:
-            base_cmd = gamepad.get_user_cmd()  # normalised [x, y, theta], deadzone applied
+            target = read_velocity_target()
             buttons = gamepad.get_button_reading()
 
             # Toggle local/global frame on the rising edge of key_mode.
@@ -141,19 +186,6 @@ def main() -> None:
             if buttons["key_left_1"]:
                 client.reset_odometry({}).result()
                 print("\nOdometry reset")
-
-            if args.no_linear_rail:
-                target = base_cmd  # 3D: [x, y, theta]
-            else:
-                rail_mps = 0.0
-                if joy.get_numaxes() > 3:
-                    # Cross-axis dominance: the rail only responds to a near-
-                    # vertical push, so an intended rotation doesn't lift it.
-                    _, right_stick_y = gamepad.get_right_stick()
-                    # Up (negative axis value) -> positive (upward) rail velocity.
-                    if np.abs(right_stick_y) > RAIL_DEADZONE:
-                        rail_mps = -right_stick_y * args.lift_max_vel_ms
-                target = np.append(base_cmd, rail_mps)  # 4D: rail in physical m/s
 
             client.set_target_velocity({"target_velocity": target, "frame": frame}).result()
 
