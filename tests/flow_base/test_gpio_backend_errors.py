@@ -48,6 +48,8 @@ def test_missing_gpio_serial_device_has_stable_typed_error(fake_serial: types.Mo
     assert "lerobot-doctor linearbot --gpio-mode pi-usb" in str(error)
     assert "robot:flowbase (window 2)" in str(error)
     assert error.__cause__ is open_error
+    # It replaces pyserial's SerialException, so except OSError must keep matching.
+    assert isinstance(error, OSError)
 
 
 def test_other_serial_open_errors_are_not_misclassified(fake_serial: types.ModuleType) -> None:

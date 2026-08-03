@@ -68,7 +68,17 @@ class I2RTHardwareError(RuntimeError):
         }
 
 
-class CanDeviceNotFoundError(I2RTHardwareError):
+class I2RTHardwareIOError(I2RTHardwareError, OSError):
+    """Base for hardware failures raised in place of an ``OSError`` from a driver.
+
+    These replace an OSError that callers may already guard with ``except OSError``
+    (SocketCAN's ``ENODEV``, pyserial's ``SerialException``), so ``OSError`` stays in
+    the MRO to keep those handlers matching. ``errno`` is not populated; the original
+    exception remains available as ``__cause__``.
+    """
+
+
+class CanDeviceNotFoundError(I2RTHardwareIOError):
     """Raised when the operating system cannot find a configured CAN device."""
 
     code = HardwareErrorCode.CAN_DEVICE_NOT_FOUND
@@ -88,7 +98,7 @@ class CanDeviceNotFoundError(I2RTHardwareError):
         )
 
 
-class GpioSerialDeviceUnavailableError(I2RTHardwareError):
+class GpioSerialDeviceUnavailableError(I2RTHardwareIOError):
     """Raised when the Pi's USB GPIO serial gadget cannot be opened on this host."""
 
     code = HardwareErrorCode.GPIO_SERIAL_DEVICE_UNAVAILABLE

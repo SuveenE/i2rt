@@ -61,6 +61,18 @@ def test_debug_steps_are_yellow_when_terminal_supports_color() -> None:
     assert all("\033[" not in step for step in error.to_dict()["debug_steps"])
 
 
+def test_missing_can_device_still_matches_except_oserror() -> None:
+    """The typed error replaces an OSError, so OSError handlers must keep matching it."""
+    with patch(
+        "i2rt.motor_drivers.can_interface.can.interface.Bus",
+        side_effect=OSError(errno.ENODEV, "No such device"),
+    ):
+        with pytest.raises(OSError) as exc_info:
+            CanInterface(channel="can_linearbot", bustype="socketcan")
+
+    assert isinstance(exc_info.value, CanDeviceNotFoundError)
+
+
 def test_other_can_open_errors_are_not_misclassified() -> None:
     os_error = OSError(errno.EACCES, "Permission denied")
 
@@ -97,6 +109,8 @@ def test_motor_nonresponse_has_stable_typed_error() -> None:
     assert error.attempts == 2
     assert "emergency stop (E-stop)" in str(error)
     assert "Check and reseat the Linearbot CAN cable." in str(error)
+    # This one replaces an AssertionError, not an OSError.
+    assert not isinstance(error, OSError)
     assert error.to_dict()["context"] == {
         "motor_id": 3,
         "interface_name": "linear_rail_vehicle",
