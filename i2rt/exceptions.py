@@ -104,8 +104,8 @@ class CanDeviceNotFoundError(I2RTHardwareIOError):
             f"CAN device {channel!r} could not be opened with interface {bustype!r}.",
             debug_steps=(
                 "Make sure the Linearbot CAN cable is firmly connected.",
-                "After reconnecting it, rerun robot:cans (window 0), robot:servers "
-                "(window 1), and robot:flowbase (window 2), in that order.",
+                "After reconnecting it, rerun robot:cans (TAB 1), robot:servers "
+                "(TAB 2), and robot:flowbase (TAB 3), in that order.",
             ),
             errno=errno,
             channel=channel,
@@ -132,7 +132,7 @@ class GpioSerialDeviceUnavailableError(I2RTHardwareIOError):
                 "between the Pi and the Linearbot PC.",
                 f"If {device} exists but cannot be opened, check that your user is in the "
                 "'dialout' group.",
-                "Once the check passes, rerun robot:flowbase (window 2).",
+                "Once the check passes, rerun robot:flowbase (TAB 3).",
             ),
             errno=errno,
             device=device,
@@ -164,7 +164,7 @@ class MotorCommunicationError(I2RTHardwareError):
                 "release or reset it if necessary.",
                 "Check that the Linearbot and motor power are on.",
                 "Check and reseat the Linearbot CAN cable.",
-                "Rerun robot:cans (window 0), robot:servers (window 1), and robot:flowbase (window 2), in that order.",
+                "Rerun robot:cans (TAB 1), robot:servers (TAB 2), and robot:flowbase (TAB 3), in that order.",
             ),
             motor_id=motor_id,
             interface_name=interface_name,

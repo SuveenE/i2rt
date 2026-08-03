@@ -39,8 +39,8 @@ def test_missing_can_device_has_stable_typed_error(
         "message": "CAN device 'can_linearbot' could not be opened with interface 'socketcan'.",
         "debug_steps": [
             "Make sure the Linearbot CAN cable is firmly connected.",
-            "After reconnecting it, rerun robot:cans (window 0), robot:servers "
-            "(window 1), and robot:flowbase (window 2), in that order.",
+            "After reconnecting it, rerun robot:cans (TAB 1), robot:servers "
+            "(TAB 2), and robot:flowbase (TAB 3), in that order.",
         ],
         "context": {
             "channel": "can_linearbot",
@@ -48,7 +48,7 @@ def test_missing_can_device_has_stable_typed_error(
         },
     }
     assert "Debug steps:" in str(error)
-    assert "robot:flowbase (window 2)" in str(error)
+    assert "robot:flowbase (TAB 3)" in str(error)
     assert error.__cause__ is os_error
     assert error.errno == errno.ENODEV
 
