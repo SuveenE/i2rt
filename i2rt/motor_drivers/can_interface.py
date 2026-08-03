@@ -24,7 +24,7 @@ class CanInterface:
             self.bus = can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
         except OSError as exc:
             if exc.errno == errno.ENODEV:
-                raise CanDeviceNotFoundError(channel=channel, bustype=bustype) from exc
+                raise CanDeviceNotFoundError(channel=channel, bustype=bustype, errno=exc.errno) from exc
             raise
         self.busstate = self.bus.state
         self.name = name

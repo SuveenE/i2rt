@@ -1,3 +1,4 @@
+import errno
 import sys
 import types
 
@@ -30,8 +31,10 @@ def fake_serial(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
 
 
 def test_missing_gpio_serial_device_has_stable_typed_error(fake_serial: types.ModuleType) -> None:
+    # pyserial reports an open failure as SerialException(errno, message).
     open_error = fake_serial.SerialException(
-        "[Errno 2] could not open port /dev/ttyACM0: [Errno 2] No such file or directory: '/dev/ttyACM0'"
+        errno.ENOENT,
+        "could not open port /dev/ttyACM0: [Errno 2] No such file or directory: '/dev/ttyACM0'",
     )
     fake_serial.open_error = open_error
 
@@ -48,8 +51,20 @@ def test_missing_gpio_serial_device_has_stable_typed_error(fake_serial: types.Mo
     assert "lerobot-doctor linearbot --gpio-mode pi-usb" in str(error)
     assert "robot:flowbase (window 2)" in str(error)
     assert error.__cause__ is open_error
-    # It replaces pyserial's SerialException, so except OSError must keep matching.
+    # It replaces pyserial's SerialException, so except OSError must keep matching,
+    # and handlers that branch on errno must still see the wrapped one.
     assert isinstance(error, OSError)
+    assert error.errno == errno.ENOENT
+
+
+def test_gpio_serial_error_tolerates_a_cause_without_errno(fake_serial: types.ModuleType) -> None:
+    """Some pyserial paths raise with only a message, and errno is then unknowable."""
+    fake_serial.open_error = fake_serial.SerialException("device reports readiness but returned no data")
+
+    with pytest.raises(GpioSerialDeviceUnavailableError) as exc_info:
+        SerialSatelliteBackend("/dev/ttyACM0")
+
+    assert exc_info.value.errno is None
 
 
 def test_other_serial_open_errors_are_not_misclassified(fake_serial: types.ModuleType) -> None:

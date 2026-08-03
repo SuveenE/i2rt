@@ -73,9 +73,23 @@ class I2RTHardwareIOError(I2RTHardwareError, OSError):
 
     These replace an OSError that callers may already guard with ``except OSError``
     (SocketCAN's ``ENODEV``, pyserial's ``SerialException``), so ``OSError`` stays in
-    the MRO to keep those handlers matching. ``errno`` is not populated; the original
-    exception remains available as ``__cause__``.
+    the MRO to keep those handlers matching. Raise sites also forward the wrapped
+    ``errno``, so handlers that branch on it (``exc.errno == errno.ENODEV``, or
+    ``os.strerror(exc.errno)``) still see what they saw before; it is ``None`` only
+    when the wrapped exception carried none. The original exception remains
+    available as ``__cause__``.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        debug_steps: tuple[str, ...] = (),
+        errno: int | None = None,
+        **context: object,
+    ) -> None:
+        super().__init__(message, debug_steps=debug_steps, **context)
+        self.errno = errno
 
 
 class CanDeviceNotFoundError(I2RTHardwareIOError):
@@ -83,7 +97,7 @@ class CanDeviceNotFoundError(I2RTHardwareIOError):
 
     code = HardwareErrorCode.CAN_DEVICE_NOT_FOUND
 
-    def __init__(self, *, channel: str, bustype: str) -> None:
+    def __init__(self, *, channel: str, bustype: str, errno: int | None = None) -> None:
         self.channel = channel
         self.bustype = bustype
         super().__init__(
@@ -93,6 +107,7 @@ class CanDeviceNotFoundError(I2RTHardwareIOError):
                 "After reconnecting it, rerun robot:cans (window 0), robot:servers "
                 "(window 1), and robot:flowbase (window 2), in that order.",
             ),
+            errno=errno,
             channel=channel,
             bustype=bustype,
         )
@@ -103,7 +118,7 @@ class GpioSerialDeviceUnavailableError(I2RTHardwareIOError):
 
     code = HardwareErrorCode.GPIO_SERIAL_DEVICE_UNAVAILABLE
 
-    def __init__(self, *, device: str) -> None:
+    def __init__(self, *, device: str, errno: int | None = None) -> None:
         self.device = device
         super().__init__(
             f"Pi USB GPIO serial device {device!r} could not be opened.",
@@ -119,6 +134,7 @@ class GpioSerialDeviceUnavailableError(I2RTHardwareIOError):
                 "'dialout' group.",
                 "Once the check passes, rerun robot:flowbase (window 2).",
             ),
+            errno=errno,
             device=device,
         )
 

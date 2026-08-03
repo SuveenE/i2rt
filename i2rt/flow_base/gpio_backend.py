@@ -345,7 +345,7 @@ class SerialSatelliteBackend(GPIOBackend):
         try:
             self._serial = serial.Serial(device, baudrate=baudrate, timeout=timeout_s)
         except serial.SerialException as e:
-            raise GpioSerialDeviceUnavailableError(device=device) from e
+            raise GpioSerialDeviceUnavailableError(device=device, errno=e.errno) from e
         self._serial_lock = threading.Lock()
         self._poll_interval = poll_interval
         self._on_limit_change: Optional[Callable] = None

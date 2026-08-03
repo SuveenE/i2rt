@@ -1,4 +1,5 @@
 import errno
+import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -49,6 +50,7 @@ def test_missing_can_device_has_stable_typed_error(
     assert "Debug steps:" in str(error)
     assert "robot:flowbase (window 2)" in str(error)
     assert error.__cause__ is os_error
+    assert error.errno == errno.ENODEV
 
 
 def test_debug_steps_are_yellow_when_terminal_supports_color() -> None:
@@ -62,7 +64,11 @@ def test_debug_steps_are_yellow_when_terminal_supports_color() -> None:
 
 
 def test_missing_can_device_still_matches_except_oserror() -> None:
-    """The typed error replaces an OSError, so OSError handlers must keep matching it."""
+    """The typed error replaces an OSError, so OSError handlers must keep working on it.
+
+    Both catching it and branching on ``errno`` (what this module itself does around
+    ``can.interface.Bus``) have to behave as they did before the typed errors landed.
+    """
     with patch(
         "i2rt.motor_drivers.can_interface.can.interface.Bus",
         side_effect=OSError(errno.ENODEV, "No such device"),
@@ -70,7 +76,10 @@ def test_missing_can_device_still_matches_except_oserror() -> None:
         with pytest.raises(OSError) as exc_info:
             CanInterface(channel="can_linearbot", bustype="socketcan")
 
-    assert isinstance(exc_info.value, CanDeviceNotFoundError)
+    error = exc_info.value
+    assert isinstance(error, CanDeviceNotFoundError)
+    assert error.errno == errno.ENODEV
+    assert os.strerror(error.errno) == os.strerror(errno.ENODEV)
 
 
 def test_other_can_open_errors_are_not_misclassified() -> None:
