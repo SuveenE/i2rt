@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Callable, Optional, Tuple
 
+from i2rt.exceptions import GpioSerialDeviceUnavailableError
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -340,7 +342,10 @@ class SerialSatelliteBackend(GPIOBackend):
         import serial  # local import: pyserial is only needed for this backend
 
         # 8N1 is pyserial's default and what the satellite expects.
-        self._serial = serial.Serial(device, baudrate=baudrate, timeout=timeout_s)
+        try:
+            self._serial = serial.Serial(device, baudrate=baudrate, timeout=timeout_s)
+        except serial.SerialException as e:
+            raise GpioSerialDeviceUnavailableError(device=device) from e
         self._serial_lock = threading.Lock()
         self._poll_interval = poll_interval
         self._on_limit_change: Optional[Callable] = None

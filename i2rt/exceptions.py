@@ -28,6 +28,7 @@ class HardwareErrorCode(str, Enum):
 
     CAN_DEVICE_NOT_FOUND = "I2RT-CAN-001"
     MOTOR_COMMUNICATION_FAILED = "I2RT-CAN-002"
+    GPIO_SERIAL_DEVICE_UNAVAILABLE = "I2RT-GPIO-001"
 
     def __str__(self) -> str:
         return self.value
@@ -84,6 +85,31 @@ class CanDeviceNotFoundError(I2RTHardwareError):
             ),
             channel=channel,
             bustype=bustype,
+        )
+
+
+class GpioSerialDeviceUnavailableError(I2RTHardwareError):
+    """Raised when the Pi's USB GPIO serial gadget cannot be opened on this host."""
+
+    code = HardwareErrorCode.GPIO_SERIAL_DEVICE_UNAVAILABLE
+
+    def __init__(self, *, device: str) -> None:
+        self.device = device
+        super().__init__(
+            f"Pi USB GPIO serial device {device!r} could not be opened.",
+            debug_steps=(
+                "Check the status light on the Raspberry Pi. If it is red, press the reset "
+                "button on the Pi and wait until the light is yellow and no longer blinking; "
+                "the serial gadget is only re-exported once the Pi has finished booting.",
+                "Run 'lerobot-doctor linearbot --gpio-mode pi-usb' and confirm the Pi USB "
+                "GPIO serial check passes.",
+                "If the device still does not appear after a reset, check the USB-C cable "
+                "between the Pi and the Linearbot PC.",
+                f"If {device} exists but cannot be opened, check that your user is in the "
+                "'dialout' group.",
+                "Once the check passes, rerun robot:flowbase (window 2).",
+            ),
+            device=device,
         )
 
 
