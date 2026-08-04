@@ -5,6 +5,8 @@ import threading
 import time
 from typing import Callable, Optional, Tuple
 
+from i2rt.exceptions import GpioSerialDeviceUnavailableError
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -17,6 +19,16 @@ UPPER_LIMIT_GPIO = 5
 LOWER_LIMIT_GPIO = 6
 
 DEFAULT_GPIO_SATELLITE_PORT = 8765
+
+# Mapping from the controller's logical BCM pins to the USB-to-GPIO converter's
+# 1-based channels (see i2rt/utils/usb_gpio_driver.py). Only used on x86 / non-Pi
+# hosts where the SerialGpioBackend drives the converter; the native RPi.GPIO
+# backend addresses the BCM pins directly and ignores this map.
+USB_GPIO_CHANNEL_MAP = {
+    UPPER_LIMIT_GPIO: 1,  # GPIO5  -> converter channel 1 (upper limit)
+    LOWER_LIMIT_GPIO: 2,  # GPIO6  -> converter channel 2 (lower limit)
+    BRAKE_CONTROL_GPIO: 3,  # GPIO12 -> converter channel 3 (brake)
+}
 
 
 class GPIOBackend(abc.ABC):
@@ -56,12 +68,21 @@ class GPIOBackend(abc.ABC):
 
 
 class LocalGPIOBackend(GPIOBackend):
-    """Backend that talks directly to RPi.GPIO on the local machine."""
+    """Backend that talks directly to a local RPi.GPIO-compatible module.
 
-    def __init__(self):
-        from RPi import GPIO  # noqa: N811
+    By default this imports the Raspberry Pi's native ``RPi.GPIO`` module. A
+    drop-in replacement can be injected via ``gpio_module`` (e.g. the USB-to-GPIO
+    converter shim in :mod:`i2rt.utils.usb_gpio_driver`), which lets the same
+    limit-switch / brake logic run unchanged on an x86 / non-Pi host.
+    """
 
-        self._GPIO = GPIO
+    def __init__(self, gpio_module: Optional[object] = None):
+        if gpio_module is None:
+            from RPi import GPIO  # noqa: N811
+
+            gpio_module = GPIO
+
+        self._GPIO = gpio_module
         self._gpio_mode_set = False
         self._on_limit_change: Optional[Callable] = None
         self._upper = False
@@ -97,6 +118,9 @@ class LocalGPIOBackend(GPIOBackend):
 
     def set_brake(self, engaged: bool) -> None:
         try:
+            # RPi.GPIO.cleanup() clears the numbering mode, so restore it when
+            # this long-lived backend receives another command after CLEANUP.
+            self._ensure_gpio_mode()
             self._GPIO.output(
                 BRAKE_CONTROL_GPIO,
                 self._GPIO.LOW if engaged else self._GPIO.HIGH,
@@ -166,6 +190,35 @@ class LocalGPIOBackend(GPIOBackend):
             logger.info("Local GPIO cleaned up")
         except Exception as e:
             logger.warning(f"GPIO cleanup error: {e}")
+        finally:
+            # GPIO.cleanup() clears the numbering mode.
+            self._gpio_mode_set = False
+
+
+# ---------------------------------------------------------------------------
+# Serial backend — USB-to-GPIO converter on an x86 / non-Pi host
+# ---------------------------------------------------------------------------
+
+
+class SerialGpioBackend(LocalGPIOBackend):
+    """Backend for x86 / non-Pi hosts driving the linear rail via a USB-to-GPIO converter.
+
+    Reuses all of :class:`LocalGPIOBackend`'s brake / limit-switch logic, but
+    injects the ``RPi.GPIO``-compatible shim from
+    :mod:`i2rt.utils.usb_gpio_driver` instead of the Pi's native ``RPi.GPIO``
+    module. The shim translates the controller's BCM pins to converter channels
+    via :data:`USB_GPIO_CHANNEL_MAP`.
+    """
+
+    def __init__(self, device: Optional[str] = None):
+        from i2rt.utils.usb_gpio_driver import get_gpio_backend
+
+        # get_gpio_backend() honors an explicit device, else the I2RT_USB_GPIO_PORT
+        # env var, else /dev/ttyUSB0. On a Pi it would return native RPi.GPIO, but
+        # this backend is only selected on non-Pi hosts (see flow_base_controller).
+        shim = get_gpio_backend(port=device, pin_map=USB_GPIO_CHANNEL_MAP)
+        super().__init__(gpio_module=shim)
+        logger.info(f"SerialGpioBackend using USB-to-GPIO converter (device={device or 'default'})")
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +309,149 @@ class RemoteGPIOBackend(GPIOBackend):
         except Exception as e:
             logger.warning(f"Remote cleanup error: {e}")
         logger.info("Remote GPIO backend cleaned up")
+
+
+# ---------------------------------------------------------------------------
+# Serial-satellite backend — talks to gpio_serial_satellite_server over USB serial
+# ---------------------------------------------------------------------------
+
+
+class SerialSatelliteBackend(GPIOBackend):
+    """Backend that talks to a ``gpio_serial_satellite_server`` over a USB serial link.
+
+    Functionally the USB-cable counterpart of :class:`RemoteGPIOBackend`: instead
+    of portal RPC over the network, it speaks a small newline-delimited ASCII
+    protocol over a CDC-ACM serial device (the Pi 5 exposes ``/dev/ttyGS0`` as a
+    USB serial gadget, which enumerates as ``/dev/ttyACM0`` on this host). The Pi
+    still drives its native GPIO via ``LocalGPIOBackend``; this only changes the
+    transport from Ethernet to the USB cable.
+
+    Protocol (``<command>\\n`` request -> single ``<reply>\\n`` line):
+        ``INIT_BRAKE``      -> ``OK``
+        ``BRAKE 1``/``BRAKE 0`` -> ``OK`` (1 = engaged, matching ``set_brake``)
+        ``INIT_LIMITS``     -> ``OK``
+        ``GET``             -> ``L <upper> <lower>`` (e.g. ``L 1 0``)
+        ``CLEANUP``         -> ``OK``
+
+    CDC-ACM is a lossless, ordered bulk transport, so no framing/checksums are
+    needed; a single lock serializes request/reply so the poll thread and the
+    main thread never interleave on the port.
+    """
+
+    def __init__(self, device: str, baudrate: int = 115200, timeout_s: float = 1.0, poll_interval: float = 0.01):
+        import serial  # local import: pyserial is only needed for this backend
+
+        # 8N1 is pyserial's default and what the satellite expects.
+        try:
+            self._serial = serial.Serial(device, baudrate=baudrate, timeout=timeout_s)
+        except serial.SerialException as e:
+            raise GpioSerialDeviceUnavailableError(device=device, errno=e.errno) from e
+        self._serial_lock = threading.Lock()
+        self._poll_interval = poll_interval
+        self._on_limit_change: Optional[Callable] = None
+        self._upper = False
+        self._lower = False
+        self._lock = threading.Lock()
+        self._polling = False
+        self._poll_thread: Optional[threading.Thread] = None
+        logger.info(f"SerialSatelliteBackend connected to {device}")
+
+    # -- transport --
+
+    def _request(self, command: str) -> str:
+        """Send ``command`` and return the satellite's single-line reply (stripped)."""
+        with self._serial_lock:
+            # Drop any stale/boot bytes so a reply always pairs with this request.
+            self._serial.reset_input_buffer()
+            self._serial.write((command + "\n").encode("ascii"))
+            self._serial.flush()
+            reply = self._serial.readline().decode("ascii", errors="replace").strip()
+        if not reply:
+            raise RuntimeError(f"No reply from GPIO serial satellite for command {command!r}")
+        return reply
+
+    def _expect_ok(self, command: str) -> None:
+        reply = self._request(command)
+        if reply != "OK":
+            raise RuntimeError(f"GPIO serial satellite returned {reply!r} for command {command!r} (expected 'OK')")
+
+    def _query_limits(self) -> Tuple[bool, bool]:
+        reply = self._request("GET")
+        parts = reply.split()
+        if len(parts) != 3 or parts[0] != "L":
+            raise RuntimeError(f"Malformed limit reply {reply!r} (expected 'L <upper> <lower>')")
+        return parts[1] == "1", parts[2] == "1"
+
+    # -- brake --
+
+    def initialize_brake(self) -> None:
+        self._expect_ok("INIT_BRAKE")
+        logger.info("Brake initialized (serial)")
+
+    def set_brake(self, engaged: bool) -> None:
+        self._expect_ok(f"BRAKE {1 if engaged else 0}")
+        logger.info(f"Brake {'engaged' if engaged else 'released'} (serial)")
+
+    # -- limit switches --
+
+    def initialize_limit_switches(
+        self, on_limit_change: Callable[[bool, bool], None]
+    ) -> None:
+        self._on_limit_change = on_limit_change
+        self._expect_ok("INIT_LIMITS")
+
+        upper, lower = self._query_limits()
+        with self._lock:
+            self._upper = upper
+            self._lower = lower
+
+        if self._on_limit_change:
+            self._on_limit_change(upper, lower)
+
+        self._polling = True
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thread.start()
+        logger.info("Limit switch monitoring started (serial, polling)")
+
+    def _poll_loop(self) -> None:
+        while self._polling:
+            try:
+                upper, lower = self._query_limits()
+
+                changed = False
+                with self._lock:
+                    if upper != self._upper or lower != self._lower:
+                        self._upper = upper
+                        self._lower = lower
+                        changed = True
+
+                if changed and self._on_limit_change:
+                    self._on_limit_change(upper, lower)
+            except Exception as e:
+                logger.error(f"Serial limit state poll error: {e}")
+
+            time.sleep(self._poll_interval)
+
+    def get_limit_states(self) -> Tuple[bool, bool]:
+        with self._lock:
+            return self._upper, self._lower
+
+    # -- cleanup --
+
+    def cleanup(self) -> None:
+        self._polling = False
+        if self._poll_thread and self._poll_thread.is_alive():
+            self._poll_thread.join(timeout=1.0)
+        try:
+            self._expect_ok("CLEANUP")
+        except Exception as e:
+            logger.warning(f"Serial cleanup error: {e}")
+        try:
+            if self._serial.is_open:
+                self._serial.close()
+        except Exception as e:
+            logger.warning(f"Serial port close error: {e}")
+        logger.info("Serial GPIO backend cleaned up")
 
 
 # ---------------------------------------------------------------------------

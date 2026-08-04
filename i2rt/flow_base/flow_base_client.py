@@ -9,12 +9,44 @@ import portal
 
 from i2rt.flow_base.flow_base_controller import BASE_DEFAULT_PORT
 
+# Hard caps for the client-side velocity limits (validated at init).
+# x, y, z are linear m/s; theta is rad/s. Min is the symmetric negative of each max.
+MAX_VEL_X_CAP = 1.0  # m/s
+MAX_VEL_Y_CAP = 1.0  # m/s
+MAX_VEL_THETA_CAP = np.pi  # rad/s
+MAX_VEL_Z_CAP = 1.0  # m/s (linear rail)
+
+# Defaults applied when the caller does not specify a limit.
+DEFAULT_MAX_VEL_X = 0.5  # m/s
+DEFAULT_MAX_VEL_Y = 0.5  # m/s
+DEFAULT_MAX_VEL_THETA = np.pi / 2  # rad/s
+DEFAULT_MAX_VEL_Z = 0.5  # m/s
+
 
 class FlowBaseClient:
-    def __init__(self, host: str = "localhost", with_linear_rail: bool = False):
+    def __init__(
+        self,
+        host: str = "localhost",
+        with_linear_rail: bool = False,
+        max_vel_x: float = DEFAULT_MAX_VEL_X,
+        max_vel_y: float = DEFAULT_MAX_VEL_Y,
+        max_vel_theta: float = DEFAULT_MAX_VEL_THETA,
+        max_vel_z: float = DEFAULT_MAX_VEL_Z,
+    ):
+        for name, value, cap in (
+            ("max_vel_x", max_vel_x, MAX_VEL_X_CAP),
+            ("max_vel_y", max_vel_y, MAX_VEL_Y_CAP),
+            ("max_vel_theta", max_vel_theta, MAX_VEL_THETA_CAP),
+            ("max_vel_z", max_vel_z, MAX_VEL_Z_CAP),
+        ):
+            if not 0.0 < value <= cap:
+                raise ValueError(f"{name}={value} must be in (0, {cap}]")
+
         self.with_linear_rail = with_linear_rail
         self.client = portal.Client(f"{host}:{BASE_DEFAULT_PORT}")
         self.num_dofs = 3 if not self.with_linear_rail else 4
+        # Per-axis symmetric clip magnitudes for [x, y, theta(, z)] commands.
+        self._max_vel = np.array([max_vel_x, max_vel_y, max_vel_theta, max_vel_z][: self.num_dofs])
         self.command = {"target_velocity": np.zeros(self.num_dofs), "frame": "local"}
         self._lock = threading.Lock()
         self.running = True
@@ -30,6 +62,18 @@ class FlowBaseClient:
     def get_odometry(self) -> Any:
         return self.client.get_odometry({}).result()
 
+    def get_wheel_speeds(self) -> Any:
+        """Return per-motor angular velocities (rad/s) for the 4 casters: {steer, drive}."""
+        return self.client.get_wheel_speeds({}).result()
+
+    def get_observation(self) -> Any:
+        """Return combined observation: odometry, wheel speeds, and linear rail state if enabled."""
+        obs: dict[str, Any] = {"odometry": self.get_odometry()}
+        if self.with_linear_rail:
+            obs["linear_rail"] = self.get_linear_rail_state()
+        obs["wheel_speeds"] = self.get_wheel_speeds()
+        return obs
+
     def reset_odometry(self) -> Any:
         return self.client.reset_odometry({}).result()
 
@@ -37,11 +81,15 @@ class FlowBaseClient:
         """Set target velocity for base and optionally linear rail.
 
         Args:
-            target_velocity: [x, y, theta] or [x, y, theta, linear_rail_vel]
+            target_velocity: [x, y, theta] or [x, y, theta, linear_rail_vel]. x, y and
+                linear_rail_vel are in m/s, theta in rad/s. Each axis is clipped to
+                ±max_vel_* client-side.
             frame: "local" or "global"
         """
         assert target_velocity.shape == (self.num_dofs,), f"Target velocity must have shape ({self.num_dofs},)"
         assert frame in ["local", "global"], "Frame must be either local or global"
+
+        target_velocity = np.clip(target_velocity, -self._max_vel, self._max_vel)
 
         with self._lock:
             self.command["target_velocity"] = target_velocity
@@ -67,10 +115,12 @@ class FlowBaseClient:
         """Set the velocity of the linear rail.
 
         Args:
-            velocity (float): Target velocity in rad/s
+            velocity (float): Target linear velocity in m/s (positive = up). Clipped to
+                ±max_vel_z client-side; converted to motor rad/s server-side.
         """
         if not self.with_linear_rail:
             raise ValueError("Linear rail not enabled. Initialize FlowBaseClient with with_linear_rail=True")
+        velocity = float(np.clip(velocity, -self._max_vel[3], self._max_vel[3]))
         with self._lock:
             if len(self.command["target_velocity"]) < 4:
                 self.command["target_velocity"] = np.append(self.command["target_velocity"], 0.0)

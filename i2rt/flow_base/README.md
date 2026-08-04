@@ -163,6 +163,82 @@ To control the base without the built-in Raspberry Pi:
 3. Clone the i2rt repository on your external computer
 4. Control the base directly through your external system
 
+### Linear Rail on x86 / non-Pi hosts (USB-GPIO converter)
+
+On the built-in Raspberry Pi the linear rail's brake and limit switches use the Pi's native GPIO (`RPi.GPIO`) — no extra setup. On an x86 / non-Pi host they are driven through a **bestep USB-to-16-channel GPIO converter** (hardware id `ZT-DPI/SY`) on a serial port. The backend is auto-selected from `platform.machine()`, so the control code is identical on both platforms.
+
+- `--device` is required when the linear rail is enabled on an x86 / non-Pi host (and `--gpio-host` is not set); on the Raspberry Pi it is not needed (native GPIO) and is ignored, e.g.
+
+  ```bash
+  python i2rt/flow_base/flow_base_controller.py --device /dev/ttyUSB0
+  ```
+
+  (The `I2RT_USB_GPIO_PORT` env var also works for programmatic use; the flag wins.)
+- Converter channel wiring: **channel 1 = upper limit switch, channel 2 = lower limit switch, channel 3 = brake**.
+- Requires `pyserial` (installed with the package).
+
+Alternatively, keep GPIO on the Pi and drive it remotely: start the GPIO satellite on the Pi (`python i2rt/flow_base/gpio_satellite_server.py --port 8765`) and pass `--gpio-host <RPI_IP>:8765` on the control host.
+
+### Linear Rail over a direct USB serial link (Pi GPIO, no network / SSH)
+
+You can also keep the rail's brake + limit switches on the Pi's native GPIO but reach them over a **direct USB cable** instead of the network. The Pi 5 exposes a **USB CDC-ACM serial gadget** on its USB-C port; you SSH into the Pi to start the serial satellite (just like the network satellite, but over the USB link instead of a network socket).
+
+```text
+Pi native GPIO (BCM 12 brake / 5 upper / 6 lower)
+   |
+   +-- LocalGPIOBackend  <--  gpio_serial_satellite_server.py  (started over SSH on the Pi)
+                                        |
+                                        |  /dev/ttyGS0  (CDC-ACM gadget)
+                                        v
+                                   [ USB-C cable ]
+                                        |
+                                        v  /dev/ttyACM0  (on the control host)
+                            SerialSatelliteBackend  ->  flow_base_controller.py
+```
+
+One-time gadget setup on the Pi (Pi 5; run once, then reboot):
+
+```bash
+sudo bash scripts/setup_pi_usb_gpio_gadget.sh
+sudo reboot
+```
+
+This adds `dtoverlay=dwc2,dr_mode=peripheral` to `config.txt` and loads `dwc2`/`g_serial` at boot (creating `/dev/ttyGS0`). Use the Pi 5's **USB-C port** (the only OTG/peripheral-capable port).
+
+Start the satellite on the Pi over SSH:
+
+```bash
+ssh i2rt@<PI_HOST>
+cd i2rt && python i2rt/flow_base/gpio_serial_satellite_server.py --port /dev/ttyGS0
+```
+
+On the control host, verify the link, then run the controller:
+
+```bash
+python i2rt/scripts/test_gpio_serial.py --device /dev/ttyACM0
+python i2rt/flow_base/flow_base_controller.py --gpio-serial /dev/ttyACM0
+```
+
+The serial protocol is newline-delimited ASCII (`INIT_BRAKE` / `BRAKE 1|0` / `INIT_LIMITS` / `GET` -> `L <upper> <lower>` / `CLEANUP`); the host polls `GET` at ~100 Hz. Requires `pyserial` on both the Pi and the control host.
+
+Notes / caveats:
+- On the Pi 5, `dr_mode=peripheral` turns the USB-C port into a power+gadget-data port only. Power the Pi from the base supply (or the 5V GPIO header) so the USB-C port is free for the PC link.
+- The serial gadget (`g_serial`) and the Ethernet gadget (`g_ether`) are mutually exclusive on this simple gadget, so SSH-over-USB-ethernet is not available while the serial gadget is active; keep wifi / wired LAN for Pi admin.
+- Precedence on the control host: `--gpio-serial` > `--gpio-host` > native Pi GPIO > USB-to-GPIO converter.
+
+Wiring (the `BCM N` are the controller's logical pins, mapped to converter channels by `USB_GPIO_CHANNEL_MAP`):
+
+```text
+x86 host --[USB 115200 8N1]--> bestep USB-to-16ch GPIO converter (ZT-DPI/SY),
+                               enumerates as /dev/ttyUSB0
+                               |
+                               +-- 3.3V --> upper/lower limit switches (common)
+                               +-- ch1  --> upper limit switch   (BCM 5)
+                               +-- ch2  --> lower limit switch   (BCM 6)
+                               +-- ch3  --> brake control signal (BCM 12)
+                               +-- GND  --> brake driver GND
+```
+
 ## Troubleshooting
 
 - **Remote unresponsive**: Toggle remote off and on to wake from sleep

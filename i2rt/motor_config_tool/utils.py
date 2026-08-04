@@ -1,8 +1,11 @@
+import errno
 import struct
 import time
 from typing import Any, List, Optional
 
 import can
+
+from i2rt.exceptions import CanDeviceNotFoundError, MotorCommunicationError
 
 
 class RawCanInterface:
@@ -13,7 +16,13 @@ class RawCanInterface:
         bitrate: int = 1000000,
         name: str = "default_can_interface",
     ):
-        self.bus = can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
+        self.channel = channel
+        try:
+            self.bus = can.interface.Bus(bustype=bustype, channel=channel, bitrate=bitrate)
+        except OSError as exc:
+            if exc.errno == errno.ENODEV:
+                raise CanDeviceNotFoundError(channel=channel, bustype=bustype, errno=exc.errno) from exc
+            raise
         self.busstate = self.bus.state
         self.name = name
 
@@ -24,12 +33,14 @@ class RawCanInterface:
     def _send_message_get_response(self, id: int, data: List[int], max_retry: int = 20) -> can.Message:
         self.try_receive_message(id)
         message = can.Message(arbitration_id=id, data=data, is_extended_id=False)
+        last_error: Exception | None = None
         for _ in range(max_retry):
             try:
                 self.bus.send(message)
                 response = self._receive_message(data[0])
                 return response
             except (can.CanError, AssertionError) as e:
+                last_error = e
                 print(e)
                 # print warning in red
                 print(
@@ -38,9 +49,15 @@ class RawCanInterface:
                     + "\033[0m"
                 )
             time.sleep(0.002)
-        raise AssertionError(
-            f"fail to communicate with the motor {id} on {self.name} at can channel {self.bus.channel_info}"
+        error = MotorCommunicationError(
+            motor_id=data[0],
+            interface_name=self.name,
+            channel=self.channel,
+            attempts=max_retry,
         )
+        if last_error is not None:
+            raise error from last_error
+        raise error
 
     def try_receive_message(self, motor_id: Optional[int] = None, timeout: float = 0.009) -> can.Message:
         """Try to receive a message from the CAN bus.

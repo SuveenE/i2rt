@@ -29,6 +29,8 @@ from i2rt.flow_base.gpio_backend import (
     LocalGPIOBackend,
     NoopGPIOBackend,
     RemoteGPIOBackend,
+    SerialGpioBackend,
+    SerialSatelliteBackend,
 )
 from i2rt.flow_base.linear_rail_controller import (
     LinearRailController,
@@ -576,6 +578,11 @@ class LinearRailVehicle(Vehicle):
         homing_timeout: float = 30.0,
         enable_linear_rail: bool = True,
         gpio_host: Optional[str] = None,
+        usb_gpio_device: Optional[str] = None,
+        gpio_serial_device: Optional[str] = None,
+        linear_rail_stroke_m: float = 1.0,
+        linear_rail_max_vel_mps: float = 0.5,
+        linear_rail_meters_per_rad: Optional[float] = None,
     ):
         """
         Initialize LinearRailVehicle with optional linear rail lift module.
@@ -583,7 +590,9 @@ class LinearRailVehicle(Vehicle):
         Args:
             vehicle_max_vel: Maximum velocity for vehicle base (x, y, theta)
             vehicle_max_accel: Maximum acceleration for vehicle base (x, y, theta)
-            lift_max_vel: Maximum velocity for linear rail lift (rad/s)
+            lift_max_vel: Linear rail homing speed in motor rad/s (applied as
+                rail_speed * HOMING_SPEED_RATIO during homing). Not a clip on user
+                commands — those are bounded in m/s by linear_rail_max_vel_mps.
             channel: CAN channel name for motor communication
             auto_start: Whether to automatically start the control loop
             lift_motor_id: Motor ID for the linear rail motor
@@ -593,8 +602,27 @@ class LinearRailVehicle(Vehicle):
             enable_linear_rail: Whether to enable linear rail. If False, only base (8 motors) will be initialized.
             gpio_host: Address of the RPi GPIO satellite server (e.g. "192.168.1.50:8765").
                 If provided, brake and limit switch GPIO operations are performed
-                remotely via portal RPC.  If *None*, falls back to local RPi.GPIO
-                or a no-op backend when RPi.GPIO is unavailable.
+                remotely via portal RPC.  If *None*, GPIO is driven locally: native
+                RPi.GPIO on a Raspberry Pi, else the USB-to-GPIO converter on x86.
+            usb_gpio_device: Serial device path for the USB-to-GPIO converter on an
+                x86 / non-Pi host (e.g. "/dev/ttyUSB0"). Only used when the linear rail
+                is enabled, no gpio_host is set, and this host is not a Raspberry Pi. If
+                *None*, the SerialGpioBackend keeps its default (/dev/ttyUSB0 or the
+                I2RT_USB_GPIO_PORT env var). Ignored on a Raspberry Pi (native GPIO).
+            gpio_serial_device: Serial device path for a Pi GPIO satellite reached over a
+                direct USB serial link (e.g. "/dev/ttyACM0"). If provided, brake and limit
+                switch GPIO operations are performed on the Pi via the
+                gpio_serial_satellite_server over USB (no network / SSH). Takes precedence
+                over gpio_host.
+            linear_rail_stroke_m: Physical stroke between the upper and lower limit
+                switches, in meters. Used to calibrate meters_per_rad during homing.
+            linear_rail_max_vel_mps: Hard cap on the rail's linear speed, in m/s, enforced
+                by the controller once calibrated (applies to both joystick and remote
+                commands).
+            linear_rail_meters_per_rad: If provided, skip startup limit-switch calibration
+                and use this fixed (signed) value as meters_per_rad. No startup rail motion
+                is performed; the current position becomes the software zero. This lets the
+                rail start when a payload blocks travel to either limit switch.
         """
         # Create base motor list (8 motors: 4 casters * 2 motors each)
         motor_list = []
@@ -633,7 +661,7 @@ class LinearRailVehicle(Vehicle):
         )
 
         # Select GPIO backend
-        gpio_backend = self._create_gpio_backend(gpio_host, enable_linear_rail)
+        gpio_backend = self._create_gpio_backend(gpio_host, enable_linear_rail, usb_gpio_device, gpio_serial_device)
         if enable_linear_rail:
             gpio_backend.initialize_brake()
 
@@ -660,6 +688,9 @@ class LinearRailVehicle(Vehicle):
                 rail_speed=lift_max_vel,
                 auto_home=False,  # Don't auto home yet, initialize GPIO first
                 homing_timeout=homing_timeout,
+                total_stroke_m=linear_rail_stroke_m,
+                max_vel_mps=linear_rail_max_vel_mps,
+                meters_per_rad_override=linear_rail_meters_per_rad,
             )
 
             # Initialize GPIO early, before starting homing
@@ -676,34 +707,68 @@ class LinearRailVehicle(Vehicle):
                 )
 
     @staticmethod
-    def _create_gpio_backend(gpio_host: Optional[str], enable_linear_rail: bool):
+    def _create_gpio_backend(
+        gpio_host: Optional[str],
+        enable_linear_rail: bool,
+        usb_gpio_device: Optional[str] = None,
+        gpio_serial_device: Optional[str] = None,
+    ):
         """Select the appropriate GPIOBackend based on configuration.
 
-        Raises RuntimeError when linear rail is enabled but no GPIO source
-        (local RPi.GPIO or remote satellite) is available — running without
-        brake and limit-switch control is unsafe.
+        Selection order (when the linear rail is enabled):
+          1. ``--gpio-serial`` set -> SerialSatelliteBackend (Pi GPIO satellite over USB serial).
+          2. ``--gpio-host`` set -> RemoteGPIOBackend (Pi GPIO satellite over RPC).
+          3. Running on a Raspberry Pi -> LocalGPIOBackend (native RPi.GPIO).
+          4. Otherwise (x86 / non-Pi) -> SerialGpioBackend (USB-to-GPIO converter).
+
+        Raises RuntimeError when the linear rail is enabled but no GPIO source is
+        available — running without brake and limit-switch control is unsafe.
         """
+        from i2rt.utils.usb_gpio_driver import is_raspberry_pi
+
         if not enable_linear_rail:
             return NoopGPIOBackend()
+
+        if gpio_serial_device is not None:
+            logger.info(f"Using serial-satellite GPIO backend at {gpio_serial_device}")
+            return SerialSatelliteBackend(gpio_serial_device)
 
         if gpio_host is not None:
             logger.info(f"Using remote GPIO backend at {gpio_host}")
             return RemoteGPIOBackend(gpio_host)
 
+        if is_raspberry_pi():
+            try:
+                backend = LocalGPIOBackend()
+                logger.info("Using local RPi.GPIO backend")
+                return backend
+            except (ImportError, RuntimeError) as e:
+                raise RuntimeError(
+                    "Linear rail is enabled and this host looks like a Raspberry Pi, "
+                    f"but RPi.GPIO could not be initialized: {e}\n"
+                    "Either:\n"
+                    "  1. Install/fix RPi.GPIO on the Pi, or\n"
+                    "  2. Start the GPIO satellite on the RPi and pass "
+                    "--gpio-host <RPI_IP>:8765, or\n"
+                    "  3. Disable the linear rail with --no-linear-rail"
+                )
+
         try:
-            backend = LocalGPIOBackend()
-            logger.info("Using local RPi.GPIO backend")
+            backend = SerialGpioBackend(usb_gpio_device)
+            logger.info("Using USB-to-GPIO serial backend (x86 / non-Pi host)")
             return backend
-        except (ImportError, RuntimeError):
+        except (ImportError, RuntimeError) as e:
             raise RuntimeError(
                 "Linear rail is enabled but no GPIO backend is available. "
-                "RPi.GPIO is not installed (not running on a Raspberry Pi) "
-                "and no --gpio-host was provided.\n"
+                "This host is not a Raspberry Pi and the USB-to-GPIO converter "
+                f"could not be initialized: {e}\n"
                 "Either:\n"
-                "  1. Run on a Raspberry Pi where RPi.GPIO is available, or\n"
+                "  1. Connect the USB-to-GPIO converter and pass --device <serial-port> "
+                "(e.g. /dev/ttyUSB0), or\n"
                 "  2. Start the GPIO satellite on the RPi and pass "
                 "--gpio-host <RPI_IP>:8765, or\n"
-                "  3. Disable the linear rail with --no-linear-rail"
+                "  3. Connect the Pi over USB serial and pass --gpio-serial /dev/ttyACM0, or\n"
+                "  4. Disable the linear rail with --no-linear-rail"
             )
 
     def set_target_velocity(self, velocity: Any, frame: str = "local") -> None:
@@ -753,17 +818,114 @@ class LinearRailVehicle(Vehicle):
         """Set the velocity of the linear rail.
 
         Args:
-            velocity: Target velocity in rad/s
+            velocity: Target linear velocity in m/s (positive = up). Converted to motor
+                rad/s using the signed calibration factor meters_per_rad so the sign stays
+                correct regardless of motor direction.
         """
         if self.linear_rail is None:
             logger.warning("Linear rail not available, ignoring velocity command")
             return
+        meters_per_rad = self.linear_rail.meters_per_rad
+        if meters_per_rad is None:
+            logger.warning("Linear rail not calibrated (meters_per_rad is None), ignoring velocity command")
+            return
+        motor_velocity = velocity / meters_per_rad  # m/s / (m/rad) = rad/s
         try:
-            self.linear_rail.set_velocity(velocity)
+            self.linear_rail.set_velocity(motor_velocity)
         except AssertionError as e:
             logger.warning(f"Linear rail velocity command rejected: {e}")
         except Exception as e:
             logger.error(f"Failed to set linear rail velocity: {e}", exc_info=True)
+
+    def move_linear_rail_to_height(
+        self,
+        target_height_m: float,
+        kp: float = 1.0,
+        max_accel_mps2: float = 0.15,
+        tolerance_m: float = 0.005,
+        timeout_s: float = 30.0,
+    ) -> None:
+        """Smoothly seek a rail height measured from the controller's current zero.
+
+        Uses the same closed-loop strategy as ``move_to_initial_height`` in the
+        LeRobot recording path: a speed-capped P-controller with acceleration
+        limiting, limit-switch checks, and a wall-clock timeout. The zero is the
+        lower limit after full calibration, or the startup position when a fixed
+        meters-per-radian override is used.
+        """
+        if self.linear_rail is None:
+            raise RuntimeError("Cannot move to an initial height without a linear rail")
+        if not 0.0 <= target_height_m <= self.linear_rail.total_stroke_m:
+            raise ValueError(
+                f"Initial height must be between 0 and {self.linear_rail.total_stroke_m:.3f} m, "
+                f"got {target_height_m:.3f} m"
+            )
+
+        meters_per_rad = self.linear_rail.meters_per_rad
+        if meters_per_rad is None:
+            raise RuntimeError("Cannot move to an initial height before the linear rail is calibrated")
+
+        homing_speed_mps = abs(self.linear_rail.rail_speed * self.linear_rail.homing_speed_ratio * meters_per_rad)
+        max_speed_mps = homing_speed_mps
+        if self.linear_rail.max_vel_mps is not None:
+            max_speed_mps = min(max_speed_mps, self.linear_rail.max_vel_mps)
+
+        logger.info(
+            f"Moving linear rail to initial height {target_height_m:.4f} m "
+            f"(speed cap {max_speed_mps:.4f} m/s, accel {max_accel_mps2:.4f} m/s^2)"
+        )
+
+        start_t = time.perf_counter()
+        last_t = start_t
+        commanded_velocity = 0.0
+        try:
+            while True:
+                now = time.perf_counter()
+                state = self.linear_rail.get_state()
+                position_m = state["position_linear"]
+                if position_m is None:
+                    raise RuntimeError("Linear rail lost its position calibration during the height move")
+
+                error = target_height_m - position_m
+                if abs(error) < tolerance_m:
+                    logger.info(f"Linear rail reached initial height at {position_m:.4f} m")
+                    break
+                if state["upper_limit_triggered"] and error > 0:
+                    logger.warning("Rail hit upper limit during initial-height move; stopping")
+                    break
+                if state["lower_limit_triggered"] and error < 0:
+                    logger.warning("Rail hit lower limit during initial-height move; stopping")
+                    break
+                if now - start_t > timeout_s:
+                    logger.warning(
+                        f"Initial-height move timed out after {timeout_s:.0f}s at {position_m:.4f} m "
+                        f"(target {target_height_m:.4f} m)"
+                    )
+                    break
+
+                target_velocity = float(np.clip(kp * error, -max_speed_mps, max_speed_mps))
+                dt = now - last_t
+                max_delta_velocity = max_accel_mps2 * dt
+                commanded_velocity += float(
+                    np.clip(target_velocity - commanded_velocity, -max_delta_velocity, max_delta_velocity)
+                )
+                self.set_linear_rail_velocity(commanded_velocity)
+                last_t = now
+                time.sleep(0.01)
+        finally:
+            # Ramp down while continuing to refresh the command, then guarantee a stop.
+            ramp_start = time.perf_counter()
+            last_t = ramp_start
+            while abs(commanded_velocity) > 1e-4 and time.perf_counter() - ramp_start < 2.0:
+                now = time.perf_counter()
+                max_delta_velocity = max_accel_mps2 * (now - last_t)
+                commanded_velocity += float(
+                    np.clip(-commanded_velocity, -max_delta_velocity, max_delta_velocity)
+                )
+                self.set_linear_rail_velocity(commanded_velocity)
+                last_t = now
+                time.sleep(0.01)
+            self.set_linear_rail_velocity(0.0)
 
     def close(self) -> None:
         """Clean up resources: stop linear rail and engage brake."""
@@ -787,6 +949,20 @@ if __name__ == "__main__":
 
     from i2rt.utils.gamepad_utils import Gamepad
 
+    def str2bool(value: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value.lower() in ("true", "t", "yes", "y", "1"):
+            return True
+        if value.lower() in ("false", "f", "no", "n", "0"):
+            return False
+        raise argparse.ArgumentTypeError(f"Expected a boolean value (true/false), got {value!r}")
+
+    # Fixed (signed) meters_per_rad used when --calibration is false. This avoids all
+    # startup rail motion and treats the current position as zero. Copied from a prior
+    # "Linear rail calibrated: ... meters_per_rad=..." log line.
+    DEFAULT_RAIL_METERS_PER_RAD = 0.016440
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--channel", type=str, default="can0")
     parser.add_argument(
@@ -799,17 +975,131 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Address of the RPi GPIO satellite server (e.g. 192.168.1.50:8765). "
-        "If not set, falls back to local RPi.GPIO or no-op.",
+        "If not set, GPIO is driven locally (native RPi.GPIO on a Pi, else the "
+        "USB-to-GPIO converter via --device).",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Serial device for the USB-to-GPIO converter (e.g. /dev/ttyUSB0). Required "
+        "with the linear rail on an x86 / non-Pi host when --gpio-host is not set. "
+        "Ignored on a Raspberry Pi (native GPIO). The I2RT_USB_GPIO_PORT env var also works.",
+    )
+    parser.add_argument(
+        "--gpio-serial",
+        type=str,
+        default=None,
+        help="Serial device for the Pi GPIO satellite reached over a direct USB serial link "
+        "(e.g. /dev/ttyACM0). If set, brake and limit switches are driven on the Pi via the "
+        "gpio_serial_satellite_server over USB (no network / SSH). Takes precedence over "
+        "--gpio-host and --device.",
+    )
+    parser.add_argument(
+        "--gamepad",
+        type=str2bool,
+        default=True,
+        metavar="{true,false}",
+        help="Whether to use a gamepad. Pass 'false' for remote-only mode: skip gamepad "
+        "init/calibration and drive the vehicle solely from remote RPC commands (default: true).",
+    )
+    parser.add_argument(
+        "--calibration",
+        type=str2bool,
+        default=False,
+        metavar="{true,false}",
+        help="Whether to run calibration on startup. When 'true', the gamepad "
+        "rest-position check runs and the linear rail performs its upper-limit "
+        f"calibration. When 'false' (default), the gamepad check is skipped and the rail uses the "
+        f"fixed meters_per_rad value ({DEFAULT_RAIL_METERS_PER_RAD}) without moving during startup; "
+        "the current rail position becomes zero. Use 'false' when a payload blocks travel "
+        "to either limit switch.",
+    )
+    parser.add_argument(
+        "--rail-max-vel",
+        type=float,
+        default=0.1,
+        help="Hard cap on the linear rail's speed, in m/s (positive). Wired through to "
+        "LinearRailController.max_vel_mps and enforced once the rail is calibrated, on "
+        "both the joystick and remote command paths. Homing moves bypass this cap "
+        "(default: 0.1).",
+    )
+    parser.add_argument(
+        "--initial-height",
+        type=float,
+        default=None,
+        metavar="METERS",
+        help="Optional linear-rail height in meters above the controller's zero (the lower "
+        "limit after full calibration, or the startup position with calibration disabled). "
+        "Smoothly seek this height before accepting gamepad or remote commands. "
+        "Must be within the configured rail stroke. "
+        "By default no additional height move is performed.",
+    )
+    parser.add_argument(
+        "--max-vel",
+        type=float,
+        nargs=3,
+        default=[0.25, 0.25, 0.78],
+        metavar=("X", "Y", "THETA"),
+        help="Base max velocity as three values: x (m/s), y (m/s), theta (rad/s). "
+        "Default: 0.25 0.25 0.78.",
+    )
+    parser.add_argument(
+        "--max-accel",
+        type=float,
+        nargs=3,
+        default=[0.15, 0.15, 0.5],
+        metavar=("X", "Y", "THETA"),
+        help="Base max acceleration as three values: x (m/s^2), y (m/s^2), theta (rad/s^2). "
+        "Default: 0.15 0.15 0.5.",
     )
 
     CALIBRATION_RETRY_DELAY = 1
     DEADZONE = 0.05  # Deadzone for base control (x, y, theta)
     RAIL_DEADZONE = 0.15  # Larger deadzone for linear rail to prevent unwanted movement
     args = parser.parse_args()
+    if args.initial_height is not None:
+        if args.no_linear_rail:
+            parser.error("--initial-height cannot be used with --no-linear-rail")
+        if not 0.0 <= args.initial_height <= 1.0:
+            parser.error("--initial-height must be between 0.0 and 1.0 meters")
 
-    max_vel = np.array([1.0, 1.0, np.pi])
-    max_accel = np.array([0.8, 0.8, 3.0])
-    lift_max_vel = 7.0  # Maximum velocity for linear rail (rad/s)
+    # The linear rail needs a GPIO source for its brake + limit switches. On an
+    # x86 / non-Pi host that means the USB-to-GPIO converter (--device /
+    # I2RT_USB_GPIO_PORT), the RPi GPIO satellite over the network (--gpio-host), or
+    # the Pi GPIO satellite over USB serial (--gpio-serial). Fail fast with a clear
+    # message instead of a later backend init error.
+    from i2rt.utils.usb_gpio_driver import ENV_PORT_VAR, is_raspberry_pi
+
+    if (
+        not args.no_linear_rail
+        and args.gpio_serial is None
+        and args.gpio_host is None
+        and args.device is None
+        and not is_raspberry_pi()
+        and ENV_PORT_VAR not in os.environ
+    ):
+        sys.exit(
+            "--device is required for the linear rail on an x86 / non-Pi host "
+            "(e.g. --device /dev/ttyUSB0). Alternatively set I2RT_USB_GPIO_PORT, "
+            "use --gpio-host <RPI_IP>:8765, use --gpio-serial /dev/ttyACM0, or "
+            "disable the rail with --no-linear-rail."
+        )
+
+    # Base velocity limits, aligned with FlowBaseClient DEFAULT_MAX_VEL_{X,Y,THETA}.
+    # Overridable via --max-vel / --max-accel (defaults match the historical values).
+    max_vel = np.array(args.max_vel)
+    max_accel = np.array(args.max_accel)
+    lift_max_vel = 7.0  # Linear rail homing speed (motor rad/s); not a clip on user commands
+    # Gamepad stick -> linear rail velocity scaling (m/s). Derived from the single
+    # --rail-max-vel knob so full stick deflection == the rail's hard speed cap; this
+    # keeps the gamepad command, the motor cap, and (via the RPC-exposed max_vel_mps)
+    # the recorded action all driven by one value instead of three.
+    lift_max_vel_ms = args.rail_max_vel
+
+    # When calibration is disabled, skip all startup rail motion, use the fixed
+    # meters_per_rad value, and make the current position zero.
+    rail_meters_per_rad = None if args.calibration else DEFAULT_RAIL_METERS_PER_RAD
 
     # Use LinearRailVehicle instead of Vehicle
     # Use --no-linear-rail flag if you only have base (8 motors) without linear rail
@@ -821,6 +1111,10 @@ if __name__ == "__main__":
         auto_home=True,
         enable_linear_rail=not args.no_linear_rail,
         gpio_host=args.gpio_host,
+        usb_gpio_device=args.device,
+        gpio_serial_device=args.gpio_serial,
+        linear_rail_meters_per_rad=rail_meters_per_rad,
+        linear_rail_max_vel_mps=args.rail_max_vel,
     )
 
     # Register cleanup function to ensure brake is engaged on exit
@@ -831,6 +1125,9 @@ if __name__ == "__main__":
             logger.error(f"Error during atexit close: {e}")
 
     atexit.register(close_vehicle)
+
+    if args.initial_height is not None:
+        vehicle.move_linear_rail_to_height(args.initial_height)
 
     class TimeoutRemoteCommand:
         """Unified remote command handler for LinearRailVehicle (base + linear rail)"""
@@ -933,26 +1230,34 @@ if __name__ == "__main__":
     # after CAN/GPIO init. Sleeping here gives those probes time to settle
     # before SDL touches them. Empirically the suveen/x-only-linear-bot
     # flow only worked because rail-parking introduced a similar delay.
-    GAMEPAD_INIT_DELAY_S = 10.0
-    logger.info(
-        f"Waiting {GAMEPAD_INIT_DELAY_S:.0f}s before gamepad init "
-        "(headless pygame.init() race workaround)"
-    )
-    time.sleep(GAMEPAD_INIT_DELAY_S)
-    gamepad = Gamepad()
-    joy = gamepad.joy
+    gamepad = None
+    joy = None
+    if not args.gamepad:
+        logger.info("Running in remote-only mode (--gamepad false): skipping gamepad init/calibration")
+    else:
+        GAMEPAD_INIT_DELAY_S = 10.0
+        logger.info(
+            f"Waiting {GAMEPAD_INIT_DELAY_S:.0f}s before gamepad init "
+            "(headless pygame.init() race workaround)"
+        )
+        time.sleep(GAMEPAD_INIT_DELAY_S)
+        gamepad = Gamepad()
+        joy = gamepad.joy
 
-    # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
-    while True:
-        gamepad._poll()
-        four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
-        if all(np.abs(axis) < DEADZONE for axis in four_axis):
-            logger.info("Joystick is at rest, please check joystick")
-            break
+        # Check all x, y, th are 0 at the beginning, if not ask user to check joystick
+        if not args.calibration:
+            logger.info("Skipping gamepad rest-position calibration check (--calibration false)")
         else:
-            logger.warning(f"four_axis: {four_axis}")
-            logger.warning("Joystick's rest position is not at the center, please check joystick")
-            time.sleep(CALIBRATION_RETRY_DELAY)
+            while True:
+                gamepad._poll()
+                four_axis = [joy.get_axis(1), joy.get_axis(0), joy.get_axis(2), joy.get_axis(3)]
+                if all(np.abs(axis) < DEADZONE for axis in four_axis):
+                    logger.info("Joystick is at rest, please check joystick")
+                    break
+                else:
+                    logger.warning(f"four_axis: {four_axis}")
+                    logger.warning("Joystick's rest position is not at the center, please check joystick")
+                    time.sleep(CALIBRATION_RETRY_DELAY)
 
     server.start(block=False)
 
@@ -977,32 +1282,42 @@ if __name__ == "__main__":
     RAIL_LOG_INTERVAL = 1.0  # Log linear rail position every 1 second
     try:
         while True:
-            gamepad_cmd = gamepad.get_user_cmd()  # 3D: [x, y, theta]
-            gamepad_button = gamepad.get_button_reading()
+            cmd_4d = np.zeros(4)
+            if gamepad is not None:
+                gamepad_cmd = gamepad.get_user_cmd()  # 3D: [x, y, theta]
+                gamepad_button = gamepad.get_button_reading()
 
-            if gamepad_button["key_mode"] and not last_gampad_mode_togged:
-                last_gampad_mode_togged = True
-                gamepad_command_frame = "global" if gamepad_command_frame == "local" else "local"
-            else:
-                last_gampad_mode_togged = False
+                if gamepad_button["key_mode"] and not last_gampad_mode_togged:
+                    last_gampad_mode_togged = True
+                    gamepad_command_frame = "global" if gamepad_command_frame == "local" else "local"
+                else:
+                    last_gampad_mode_togged = False
 
-            # Handle reset odometry (key_left_1)
-            if gamepad_button["key_left_1"]:
-                vehicle.reset_odometry()
+                # Handle reset odometry (key_left_1)
+                if gamepad_button["key_left_1"]:
+                    vehicle.reset_odometry()
 
-            lift_vel = 0.0
-            if joy.get_numaxes() > 3:
-                right_stick_y = joy.get_axis(3)  # Right stick Y-axis
-                # Apply larger deadzone for linear rail to prevent unwanted movement
-                # Invert: up (negative axis value) = positive velocity
-                if np.abs(right_stick_y) > RAIL_DEADZONE:
-                    lift_vel = -right_stick_y  # Invert: up (negative axis) = positive velocity
+                lift_vel = 0.0
+                if joy.get_numaxes() > 3:
+                    # Cross-axis dominance: the rail only responds to a near-
+                    # vertical push, so an intended rotation doesn't lift it.
+                    _, right_stick_y = gamepad.get_right_stick()  # Right stick Y-axis
+                    # Apply larger deadzone for linear rail to prevent unwanted movement
+                    # Invert: up (negative axis value) = positive velocity
+                    if np.abs(right_stick_y) > RAIL_DEADZONE:
+                        lift_vel = -right_stick_y  # Invert: up (negative axis) = positive velocity
 
-            cmd_4d = np.append(gamepad_cmd, lift_vel)
+                cmd_4d = np.append(gamepad_cmd, lift_vel)
 
             is_remote_command_valid = remote_command.is_command_valid()
 
-            if is_remote_command_valid:
+            if gamepad is None:
+                # Remote-only mode: always defer to remote commands. When no valid
+                # remote command is present, cmd_4d stays zero so the vehicle stops.
+                gamepad_command_override = False
+                if is_remote_command_valid:
+                    user_cmd, user_frame = remote_command.get_command()
+            elif is_remote_command_valid:
                 user_cmd, user_frame = remote_command.get_command()
                 gamepad_command_override = False
 
@@ -1014,15 +1329,18 @@ if __name__ == "__main__":
                 print("Motor interface is not running, exiting...")
                 print("Please check the E stop or the motor connection. ")
                 break
-            if gamepad_command_override:
-                cmd = cmd_4d
-                frame = gamepad_command_frame
-            else:
+            if not gamepad_command_override and is_remote_command_valid:
                 cmd = user_cmd
                 frame = user_frame
+            else:
+                cmd = cmd_4d
+                frame = gamepad_command_frame
             if count % 20 == 0:
-                raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
-                axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                if gamepad is not None:
+                    raw_axes = [joy.get_axis(i) for i in range(joy.get_numaxes())]
+                    axes_str = " ".join(f"a{i}:{v:.2f}" for i, v in enumerate(raw_axes))
+                else:
+                    axes_str = "no gamepad"
                 sys.stdout.write(f"\rframe: {frame} cmd: {cmd[0]:.1f} {cmd[1]:.1f} {cmd[2]:.1f} rail: {cmd[3]:.1f} | {axes_str}")
                 sys.stdout.flush()
 
@@ -1044,11 +1362,20 @@ if __name__ == "__main__":
 
             count += 1
 
-            # Set target velocity (supports both 3D and 4D)
+            # Set target velocity (supports both 3D and 4D).
+            #
+            # Base axes are always normalized [-1, 1] (gamepad sticks and remote
+            # clients alike) and scaled here by max_vel. The linear rail is in
+            # physical m/s: gamepad sticks are scaled by lift_max_vel_ms, while
+            # remote clients (e.g. lerobot) already send m/s and pass through
+            # unscaled. LinearRailVehicle.set_linear_rail_velocity then converts
+            # m/s to motor rad/s via the calibrated meters_per_rad.
             if len(cmd) == 4:
-                # 4D: [x, y, theta, linear_rail] - cmd is already normalized [-1, 1]
                 base_cmd = cmd[:3] * max_vel
-                rail_cmd = cmd[3] * lift_max_vel
+                if gamepad_command_override:
+                    rail_cmd = cmd[3] * lift_max_vel_ms  # stick [-1, 1] -> m/s
+                else:
+                    rail_cmd = cmd[3]  # remote rail command already in m/s
                 scaled_cmd = np.append(base_cmd, rail_cmd)
                 vehicle.set_target_velocity(scaled_cmd, frame=frame)
             else:
@@ -1096,7 +1423,8 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Error during close: {e}")
         try:
-            gamepad.close()
+            if gamepad is not None:
+                gamepad.close()
         except Exception:
             pass
         try:

@@ -127,8 +127,14 @@ def get_limit_states(input_dict=None):
 def cleanup(input_dict=None):
     global _limit_switches_initialized, _brake_initialized
     try:
-        GPIO.remove_event_detect(UPPER_LIMIT_GPIO)
-        GPIO.remove_event_detect(LOWER_LIMIT_GPIO)
+        # Ensure a pin numbering mode is set; otherwise RPi.GPIO raises
+        # "Please set pin numbering mode" if the server is killed before any
+        # client initialized the brake or limit switches (e.g. Ctrl-C right
+        # after startup).
+        _ensure_gpio_mode()
+        if _limit_switches_initialized:
+            GPIO.remove_event_detect(UPPER_LIMIT_GPIO)
+            GPIO.remove_event_detect(LOWER_LIMIT_GPIO)
         GPIO.cleanup()
         _limit_switches_initialized = False
         _brake_initialized = False

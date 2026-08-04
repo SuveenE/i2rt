@@ -9,6 +9,7 @@ from typing import Any, Callable, List, Optional, Protocol, Tuple
 import can
 import numpy as np
 
+from i2rt.exceptions import MotorCommunicationError
 from i2rt.motor_drivers.can_interface import CanInterface
 from i2rt.motor_drivers.utils import (
     FeedbackFrameInfo,
@@ -213,7 +214,7 @@ class DMSingleMotorCanInterface(CanInterface):
         data = [0xFF] * 7 + [0xFE]
         try:
             message = self._send_message_get_response(id, motor_id, data, 2)
-        except AssertionError:
+        except MotorCommunicationError:
             pass
         # check if set zero position success
         current_state = self.set_control(id, MotorType.DM4310, 0, 0, 0, 0, 0)
@@ -476,6 +477,14 @@ class DMChainCanInterface(MotorChain):
 
     def _joint_position_sim_to_real_idx(self, joint_position_sim: float, idx: int) -> float:
         return joint_position_sim * self.motor_direction[idx] + self.motor_offset[idx]
+
+    def set_zero_position(self, motor_idx: int) -> None:
+        """Set a motor's current position as zero by shifting its software offset.
+
+        Leaves the raw absolute-position accumulator intact so wrap-around unwrapping keeps working.
+        """
+        with self.state_lock:
+            self.motor_offset[motor_idx] = self.absolute_positions[motor_idx]
 
     def _motor_on(self) -> None:
         motor_feedback = []
